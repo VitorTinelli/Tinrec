@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.cache/
+.tools/
+.vercel/
+.env*
+!.env.example
+**/bin/
+**/obj/
+artifacts/
+*.user
+*.log

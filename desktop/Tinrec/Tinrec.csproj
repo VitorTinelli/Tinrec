@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings><PlatformTarget>x64</PlatformTarget><RuntimeIdentifier>win-x64</RuntimeIdentifier><ApplicationManifest>app.manifest</ApplicationManifest><AssemblyName>Tinrec</AssemblyName><Version>0.1.0</Version></PropertyGroup>
+ <PropertyGroup><Platform>x64</Platform><Platforms>x64</Platforms></PropertyGroup>
+ <ItemGroup><PackageReference Include="ScreenRecorderLib" Version="7.0.1"/><PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0"/></ItemGroup>
+</Project>
