@@ -1,0 +1,12 @@
+desktop/
+desktop-app/
+desktop-rust/
+artifacts/
+.tools/
+.github/
+tests/
+scripts/test-desktop.py
+node_modules/
+.env*
+!.env.example
+*.log

@@ -1,17 +1,23 @@
 # Tinrec
 
-Gravador para Windows 11 e biblioteca privada de vídeos, com compartilhamento por link e arquivos no Google Drive do proprietário.
+Gravador de tela e áudio com desktop Rust/Tauri, biblioteca privada e vídeos no Google Drive de cada usuário. O site usa R2 privado para reprodução temporária enquanto o Drive prepara seu player.
 
-**Estado: versão inicial para testes.** Aplicativo e site implementados; captura real e testes locais executados. A publicação foi recusada pela Vercel por bloqueio de uso justo da equipe. Google OAuth e Neon ainda precisam ser configurados. O teste prolongado revelou variação de memória e taxa efetiva de quadros: veja [VALIDATION.md](VALIDATION.md).
+**Estado: versão em validação.** O site está publicado em [tinrec.vercel.app](https://tinrec.vercel.app), com Google OAuth, Neon e R2 configurados. A captura real foi validada no Linux; os fluxos de interface, mute, descarte, retomada de upload e execução em segundo plano têm testes automatizados. A execução nativa em Windows/macOS ainda precisa de homologação.
 
-## Abrir o aplicativo
+O [desktop Tauri](desktop-app/README.md) tem prévia da captura, mini menu flutuante, mute separado, descarte, conexão com Google e fila de upload retomável. Fechar no X mantém gravações e envios em segundo plano; a bandeja permite reabrir e sair.
+
+No Linux deste ambiente, execute `./artifacts/Tinrec-linux-x64` (binário local não versionado). Para executar a partir do código, consulte os pré-requisitos do desktop e use `npm ci` e `npm run desktop:dev`. Veja a [validação da interface](desktop-app/VALIDATION.md), a [validação do motor](desktop-rust/VALIDATION.md) e a [configuração de produção](DEPLOYMENT.md).
+
+O aplicativo Windows WPF original foi preservado e está descrito abaixo.
+
+## Aplicativo Windows original (WPF)
 
 Execute `artifacts/Tinrec-Setup-0.1.0-x64.exe` para instalar ou extraia `artifacts/Tinrec-Windows-x64.zip` e abra `Tinrec.exe`.
 
 O aplicativo inclui o runtime .NET. A captura requer Windows 11 x64, Visual C++ Redistributable x64 e Media Foundation. O instalador inclui o redistribuível Microsoft e só o executa quando não está instalado. Em edições Windows N, instale o Media Feature Pack nas configurações do Windows.
 
 1. Em **Conta e preferências**, informe o endereço HTTPS do seu site.
-2. Clique em **Conectar com Google**. No navegador, entre na conta proprietária e aprove o código exibido no aplicativo.
+2. Clique em **Conectar com Google**. No navegador, entre na sua conta Google e aprove o código exibido no aplicativo.
 3. Escolha monitor, tela inteira ou área, 720p/1080p e dispositivos de áudio.
 4. Grave, pause/retome e pare. O link é copiado quando disponível; deixe o aplicativo aberto para concluir o envio.
 
@@ -24,7 +30,7 @@ O nome padrão usa prefixo e data/hora local. O título pode ser ajustado antes 
 ### 1. Google Cloud
 
 - Crie um projeto e habilite a **Google Drive API**.
-- Configure a tela de consentimento OAuth para sua conta e os escopos `openid`, `email` e `https://www.googleapis.com/auth/drive.file`.
+- Configure a tela de consentimento OAuth para os usuários do aplicativo e os escopos `openid`, `email` e `https://www.googleapis.com/auth/drive.file`.
 - Crie um cliente OAuth do tipo **Aplicativo da Web**.
 - Cadastre exatamente `https://SEU-SITE/api/auth/callback` como URI de redirecionamento; para desenvolvimento, acrescente `http://localhost:5173/api/auth/callback`.
 - Se o app estiver em modo de teste, inclua sua conta entre os usuários de teste. O Google pode expirar autorizações de aplicativos em teste; nesse caso, use **Reconectar Google**. Para uso duradouro, configure a publicação da tela de consentimento conforme o console Google.
@@ -50,7 +56,6 @@ A migração cria as tabelas de proprietário, sessões, vínculos e gravações
 | --- | --- |
 | `APP_URL` | Origem exata do site, como `https://tinrec.exemplo.com` |
 | `DATABASE_URL` | Connection string PostgreSQL Neon com TLS |
-| `OWNER_EMAIL` | Único e-mail Google permitido nesta versão |
 | `GOOGLE_CLIENT_ID` | ID do cliente OAuth Web |
 | `GOOGLE_CLIENT_SECRET` | Segredo do cliente OAuth Web |
 | `TOKEN_ENCRYPTION_KEY` | 32 bytes aleatórios em base64 |
@@ -61,11 +66,11 @@ Gere a chave uma vez e guarde-a com segurança:
 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
-Cadastre as seis variáveis na Vercel. **Não use prefixo `VITE_` para segredos.** Não versione `.env`. Trocar a chave invalida os refresh tokens e sessões de upload cifrados existentes; reconecte o Google após uma troca planejada.
+Cadastre as cinco variáveis na Vercel. **Não use prefixo `VITE_` para segredos.** Não versione `.env`. Trocar a chave invalida os refresh tokens e sessões de upload cifrados existentes; reconecte o Google após uma troca planejada.
 
 ### 4. Publicar
 
-Após resolver o bloqueio da equipe Vercel:
+Para publicar na sua equipe Vercel:
 
 ```powershell
 npx vercel login
@@ -115,8 +120,8 @@ O site é privado na biblioteca, mas o vídeo compartilhado é acessível a qual
 
 ## Limites desta entrega
 
-- Um proprietário por instalação do backend; Windows x64. Sem webcam, editor, transcrição, comentários ou cobrança.
-- Não houve validação real Google OAuth → Drive → Vercel por falta das credenciais e bloqueio de publicação.
+- Cada usuário conecta seu próprio Drive; o cliente original é Windows x64 e a interface Rust está em validação multiplataforma. Sem webcam, editor, transcrição, comentários ou cobrança.
+- Login Google e upload ao Drive foram usados em produção; o R2 passou no teste real de upload, leitura parcial e exclusão. A reprodução de uma gravação real com a troca do player temporário para o Drive ainda requer validação do usuário.
 - O teste prolongado concluiu, mas não aprovou desempenho sustentado de 30 FPS nem estabilidade de memória privada. Não há promessa de reprodução instantânea.
 - A gravação em múltiplos monitores com DPI diferentes exige validação no hardware correspondente. A seleção converte para pixels físicos e limita a área ao monitor escolhido.
 - Uma interrupção abrupta durante a gravação pode deixar MP4 não finalizado; o arquivo é preservado e marcado para atenção, sem envio automático de um arquivo possivelmente corrompido.
