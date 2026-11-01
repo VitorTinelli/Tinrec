@@ -38,6 +38,17 @@ jobs:
       - name: Windows encoder
         if: runner.os == 'Windows'
         run: choco install ffmpeg -y --no-progress
+      - name: Stage Windows encoder resources
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $encoder = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg*/tools" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (!$encoder) { throw 'FFmpeg executable not found' }
+          $destination = 'desktop-app/src-tauri/resources/windows'
+          New-Item -ItemType Directory -Force "$destination/bin", "$destination/licenses" | Out-Null
+          Copy-Item $encoder.FullName "$destination/bin/ffmpeg.exe"
+          Copy-Item (Join-Path $encoder.DirectoryName 'ffprobe.exe') "$destination/bin/ffprobe.exe"
+          Copy-Item (Join-Path (Split-Path $encoder.DirectoryName -Parent) 'LICENSE') "$destination/licenses/FFmpeg-LICENSE.txt"
       - run: npm ci
       - run: npm run desktop:web:build
       - name: Interface tests

@@ -348,3 +348,7 @@ A janela principal inicia em 820 × 700, com mínimo de 700 × 560. O gravador t
 uma única coluna; durante a captura, uma faixa compacta mantém o estado e os
 controles acessíveis, além do mini menu flutuante. Não há um botão separado de
 início: os quatro cartões iniciam o fluxo de captura.
+
+## Instalador Windows com ferramentas incluídas
+
+Execute o workflow manual **Windows installer** no GitHub Actions. O artefato `Tinrec-Windows-x64-installer` contém `Tinrec-Windows-x64-setup.exe` e o checksum SHA-256. O instalador NSIS inclui FFmpeg, ffprobe e seus avisos de licença; instala para o usuário atual e baixa o WebView2 caso necessário. Requer internet para instalar WebView2 se ele ainda não estiver presente. O pacote é x64 e ainda não possui assinatura digital.

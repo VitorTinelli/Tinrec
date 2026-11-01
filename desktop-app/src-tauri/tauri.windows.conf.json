@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/windows/bin/ffmpeg.exe": "bin/ffmpeg.exe",
+      "resources/windows/bin/ffprobe.exe": "bin/ffprobe.exe",
+      "resources/windows/licenses/": "licenses/ffmpeg/"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": { "languages": ["PortugueseBR", "English"], "displayLanguageSelector": false, "installMode": "currentUser" }
+    }
+  }
+}

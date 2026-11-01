@@ -1,0 +1,58 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-app/src-tauri
+      - name: Install encoder
+        run: choco install ffmpeg -y --no-progress
+      - name: Bundle encoder and notices
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $encoder = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg*/tools" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (!$encoder) { throw 'FFmpeg executable not found' }
+          $destination = 'desktop-app/src-tauri/resources/windows'
+          New-Item -ItemType Directory -Force "$destination/bin", "$destination/licenses" | Out-Null
+          Copy-Item $encoder.FullName "$destination/bin/ffmpeg.exe"
+          Copy-Item (Join-Path $encoder.DirectoryName 'ffprobe.exe') "$destination/bin/ffprobe.exe"
+          $license = Join-Path (Split-Path $encoder.DirectoryName -Parent) 'LICENSE'
+          if (!(Test-Path $license)) { throw "FFmpeg license not found: $license" }
+          Copy-Item $license "$destination/licenses/FFmpeg-LICENSE.txt"
+          & "$destination/bin/ffmpeg.exe" -version | Out-File "$destination/licenses/FFmpeg-build.txt" -Encoding utf8
+          @('FFmpeg project: https://ffmpeg.org/', 'Windows binary distributor: https://www.gyan.dev/ffmpeg/builds/', 'Source and build instructions: https://github.com/GyanD/codexffmpeg', 'Installed via: https://community.chocolatey.org/packages/ffmpeg') | Out-File "$destination/licenses/FFmpeg-NOTICE.txt" -Encoding utf8
+          & "$destination/bin/ffprobe.exe" -version
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed' }
+      - run: npm ci
+      - name: Check interface
+        run: npx vitest run desktop-app/src
+      - name: Build Windows x64 installer
+        run: npm run desktop:package -- --bundles nsis --target x86_64-pc-windows-msvc
+      - name: Prepare installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/windows-installer | Out-Null
+          $installer = Get-ChildItem desktop-app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (!$installer) { throw 'Installer not generated' }
+          Copy-Item $installer.FullName artifacts/windows-installer/Tinrec-Windows-x64-setup.exe
+          $hash = (Get-FileHash artifacts/windows-installer/Tinrec-Windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  Tinrec-Windows-x64-setup.exe" | Out-File artifacts/windows-installer/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tinrec-Windows-x64-installer
+          path: artifacts/windows-installer/*
+          if-no-files-found: error
+          retention-days: 30
