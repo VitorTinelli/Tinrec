@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Eventos da janela principal. Arquivos são abertos por comandos Rust restritos às gravações.",
+  "windows": ["main"],
+  "permissions": ["core:event:default"]
+}

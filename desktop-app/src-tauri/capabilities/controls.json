@@ -1,0 +1,11 @@
+{
+  "identifier": "recording-controls",
+  "description": "Eventos e arraste do mini menu de grava\u00e7\u00e3o.",
+  "windows": [
+    "controls"
+  ],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-start-dragging"
+  ]
+}
