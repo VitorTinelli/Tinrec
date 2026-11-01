@@ -193,3 +193,27 @@ O teste verifica a implementação do protocolo da bandeja; não automatiza cliq
 no painel KDE/GNOME nem confirma a aparência em todos os ambientes gráficos.
 Não habilita autostart no login do sistema. As rotinas de upload não dependem da
 visibilidade da janela e seguem executando até Sair ser acionado.
+
+## Tela, janela, área e câmera — 2026-11-01
+
+- Quatro opções na interface e atalhos independentes para tela, janela e área.
+- WindowCaptureTarget chega ao backend; o portal Wayland usa `types=2` para
+  janela e `types=1` para tela, sem a opção de monitor no seletor de janelas.
+- Seleção de área conferida no navegador com uma fonte FFmpeg gerada: arraste,
+  dimensões em pixels da fonte original e confirmação antes de iniciar.
+- Integração sintética gera MP4 com recorte de coordenada/largura ímpares,
+  verifica dimensões finais e prova que o tempo de seleção fica fora do vídeo.
+  Cancelamento não publica MP4 nem arquivo parcial.
+- Pipeline de câmera testado com lavfi, sem acessar câmera física: leitura BGRA,
+  preservação de aspecto/padding e encerramento do processo. Parsers de listas
+  Windows/macOS testados para não confundir áudio, telas e câmeras.
+- Captura de câmera real, áudio/câmera e permissões precisam ser validados no
+  hardware. Windows/macOS ainda dependem de execução do CI e teste nativo.
+
+## Webcam flutuante e controles ao vivo
+
+- Interface: teste do botão de ativar/desativar no mini menu, prévia restrita à sessão ativa e limpeza ao desligar. Suíte desktop: 20 testes aprovados.
+- Motor: MP4 sintético decodificado em cinco momentos comprova ativação, mudança de canto, desativação sem resíduo e reativação na última posição.
+- Decoder: fonte FFmpeg gerada testa câmera quadrada e encerramento/reabertura do processo no mesmo arquivo de log.
+- Nativo: 15 testes aprovados, incluindo persistência da posição e rejeição de valores inválidos. Clippy sem avisos.
+- Executável Linux atualizado. Câmera física, arraste no compositor real e captura da janela flutuante no Linux ainda exigem teste manual; os testes automatizados não acessam a câmera pessoal. Windows e macOS não foram executados neste ambiente.

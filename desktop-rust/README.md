@@ -202,3 +202,14 @@ com continuidade por amostras, para não tratar rajadas de callbacks como retroc
 Próximas etapas: homologar captura real nos outros sistemas e portar vínculo,
 fila persistente e upload com retomada. Credenciais precisarão de armazenamento
 seguro específico de cada sistema em lugar de DPAPI exclusivo do Windows.
+
+## Alvos de captura
+
+`--capture-mode screen|window|area|camera` seleciona o alvo. O padrão permanece
+screen. `--display` recebe o identificador da tela, janela ou câmera. Para área
+pela CLI, use `--crop x,y,largura,altura`; a GUI oferece seleção interativa.
+O retângulo é validado contra a fonte e aplicado antes da codificação. Câmera
+usa FFmpeg V4L2/DirectShow/AVFoundation e preserva o motor de pausa, áudio e MP4.
+Relógios independentes de câmera/áudio são alinhados ao host e exigem validação
+perceptiva. Ver `vendor/pinray-platform-linux/README.tinrec.md` para o ajuste do
+portal Wayland que restringe os tipos de fonte.

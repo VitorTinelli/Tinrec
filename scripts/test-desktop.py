@@ -109,9 +109,9 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
             capabilities = {"capabilities": {"alwaysMatch": {"tauri:options": {"application": str(args.binary.resolve())}}}}
             session = request("POST", "/session", capabilities)["sessionId"]
             command("POST", "/timeouts", {"implicit": 10000})
-            wait_for("return !!document.querySelector('button.start-button') && !document.querySelector('button.start-button').disabled", "app ready")
-            badge = javascript("return document.querySelector('.local-badge').textContent")
-            assert args.native or "Teste com imagem" in badge, "Refusing real capture: use a debug binary or explicitly pass --native"
+            wait_for("return !!document.querySelector('button[data-capture-mode=screen]') && !document.querySelector('button[data-capture-mode=screen]').disabled", "app ready")
+            synthetic = javascript("return document.querySelector('.app-shell').dataset.synthetic === 'true'")
+            assert args.native or synthetic, "Refusing real capture: use a debug binary or explicitly pass --native"
             screenshot("ready")
             main_handle=command("GET","/window")
             controls_handle=None
@@ -127,15 +127,16 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 command("POST","/window",{"handle":controls_handle})
             reports = []
             for index in range(0 if args.background else (1 if args.native else 2)):
+                click('.workspace-nav > button:nth-of-type(3)')
                 title = element("#title")
                 command("POST", f"/element/{title}/clear", {})
                 command("POST", f"/element/{title}/value", {"text": f"Teste da interface {index + 1}"})
-                click("button.start-button")
+                click('.workspace-nav > button:nth-of-type(1)')
+                click("button[data-capture-mode=screen]")
                 state("Gravando")
                 time.sleep(1.1)
                 if args.controls and index==0:
-                    wait_for("return document.querySelector('.preview-viewport img')?.naturalWidth > 0", "capture preview")
-                    screenshot("recording-preview")
+                    screenshot("recording")
                     floating()
                     wait_for("return !document.querySelector('button[aria-label=\"Silenciar microfone\"]')?.disabled", "floating controls ready")
                     click('button[aria-label="Silenciar microfone"]')
@@ -161,8 +162,11 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 time.sleep(1.1)
                 click(".record-actions .stop-button")
                 state("Vídeo salvo")
-                wait_for(f"return document.querySelectorAll('.file-row').length >= {index + 1}", "recording in library")
+                wait_for(f"return document.querySelectorAll('.video-card').length >= {index + 1}", "recording in library")
+                click('.workspace-nav > button:nth-of-type(2)')
+                wait_for("return document.querySelector('.video-thumbnail img')?.naturalWidth > 0", "video thumbnail")
                 screenshot(f"completed-{index + 1}")
+                click('.workspace-nav > button:nth-of-type(1)')
                 paths = sorted(Path(data_dir, "Recordings").glob("*.capture.json"), key=lambda path: path.stat().st_mtime_ns)
                 report = json.loads(paths[-1].read_text())
                 assert report["status"] == "completed", report.get("error")
@@ -178,7 +182,8 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 title=element("#title")
                 command("POST",f"/element/{title}/clear",{})
                 command("POST",f"/element/{title}/value",{"text":"Teste de descarte"})
-                click("button.start-button");state("Gravando")
+                click('.workspace-nav > button:nth-of-type(1)')
+                click("button[data-capture-mode=screen]");state("Gravando")
                 wait_for("return document.querySelector('.preview-viewport img')?.naturalWidth > 0", "preview before discard")
                 floating();click('button[aria-label="Descartar gravação"]')
                 wait_for("return !!document.querySelector('[role=alertdialog]')", "discard confirmation")
@@ -202,7 +207,8 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 tray_call("/StatusNotifierItem","org.kde.StatusNotifierItem.Activate","0","0")
                 wait_for("return document.visibilityState === 'visible'", "main window reopened from tray")
                 title=element("#title");command("POST",f"/element/{title}/clear",{});command("POST",f"/element/{title}/value",{"text":"Teste em segundo plano"})
-                click("button.start-button");state("Gravando");assert invoke("hide_to_tray")["ok"]
+                click('.workspace-nav > button:nth-of-type(1)')
+                click("button[data-capture-mode=screen]");state("Gravando");assert invoke("hide_to_tray")["ok"]
                 first=invoke("get_snapshot")["value"];time.sleep(.8);second=invoke("get_snapshot")["value"]
                 assert second["phase"]=="recording" and second["elapsedSeconds"]>first["elapsedSeconds"]+.3, "Closing main window stopped the capture"
                 layout=tray_call("/MenuBar","com.canonical.dbusmenu.GetLayout","0","-1","[]")
