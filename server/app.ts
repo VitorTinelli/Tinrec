@@ -1,4 +1,9 @@
 import express from "express";
+import {
+  r2Storage,
+  temporaryVideos,
+  type TemporaryStorage,
+} from "./temporary.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Database } from "./db.js";
@@ -44,8 +49,10 @@ const view = (r: any) => ({
 export function createApp(
   db: Database = realDb,
   drive: Drive = googleDrive(db),
+  storage: TemporaryStorage = r2Storage(),
 ) {
   const app = express();
+  const temporary = temporaryVideos(db, storage);
   app.disable("x-powered-by");
   app.use(express.json({ limit: "16kb" }));
   app.use("/api", (_req, res, next) => {
@@ -56,7 +63,11 @@ export function createApp(
     next();
   });
   app.get("/api/health", (_req, res) =>
-    res.json({ configured: configReady(), name: "Tinrec" }),
+    res.json({
+      configured: configReady(),
+      name: "Tinrec",
+      r2Configured: storage.ready(),
+    }),
   );
   app.use("/api", (_req, _res, next) => {
     if (!configReady())
@@ -82,7 +93,6 @@ export function createApp(
     );
     if (
       !s ||
-      s.email.toLowerCase() !== process.env.OWNER_EMAIL!.toLowerCase() ||
       (webOnly && s.kind !== "web") ||
       (bearer && s.kind !== "device") ||
       (!bearer && s.kind !== "web")
@@ -206,12 +216,14 @@ export function createApp(
     const user = await profile.json();
     if (
       !user.email_verified ||
-      user.email?.toLowerCase() !== process.env.OWNER_EMAIL!.toLowerCase()
+      typeof user.email !== "string" ||
+      typeof user.sub !== "string" ||
+      !user.sub
     )
       throw new HttpError(
         403,
-        "owner_only",
-        "Esta versão do Tinrec está disponível somente para a conta do proprietário.",
+        "unverified_account",
+        "Conecte uma conta Google com e-mail verificado.",
       );
     await db.query(
       "INSERT INTO users(id,email,refresh_token) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET email=EXCLUDED.email,refresh_token=COALESCE(EXCLUDED.refresh_token,users.refresh_token)",
@@ -237,7 +249,20 @@ export function createApp(
   });
   app.get("/api/me", async (req, res) => {
     const s = await auth(req);
-    res.json({ email: s.email });
+    res.json({ email: s.email, id: s.user_id });
+  });
+  app.post("/api/devices/revoke", async (req, res) => {
+    await auth(req);
+    const bearer = req.headers.authorization?.match(
+      /^Bearer ([A-Za-z0-9_-]+)$/,
+    )?.[1];
+    if (!bearer)
+      throw new HttpError(401, "unauthorized", "Use a sessão do aplicativo.");
+    await db.query(
+      "DELETE FROM sessions WHERE token_hash=$1 AND kind='device'",
+      [hash(bearer)],
+    );
+    res.json({ ok: true });
   });
   app.post("/api/logout", async (req, res) => {
     await auth(req);
@@ -353,6 +378,153 @@ export function createApp(
     ]);
     res.json({ ok: true });
   });
+  app.post("/api/recordings/:id/discard", async (req, res) => {
+    const s = await auth(req),
+      id = uuid.parse(req.params.id);
+    const {
+      rows: [r],
+    } = await db.query("SELECT * FROM recordings WHERE id=$1 AND owner_id=$2", [
+      id,
+      s.user_id,
+    ]);
+    if (!r) {
+      res.json({ ok: true });
+      return;
+    }
+    const { rows } = await db.query(
+      "DELETE FROM recordings WHERE id=$1 AND owner_id=$2 AND drive_file_id IS NULL AND temp_size_bytes=0 AND status IN ('recording','error') RETURNING id",
+      [id, s.user_id],
+    );
+    if (!rows.length)
+      throw new HttpError(
+        409,
+        "already_uploading",
+        "Este vídeo já foi enviado ou entrou no envio. Descarte apenas a gravação em andamento.",
+      );
+    res.json({ ok: true });
+  });
+  app.post("/api/recordings/:id/temporary", async (req, res) => {
+    const { r } = await owned(req);
+    const b = z
+      .object({
+        sizeBytes: z
+          .number()
+          .int()
+          .positive()
+          .max(5 * 1024 ** 4),
+        durationMs: z.number().int().nonnegative(),
+      })
+      .parse(req.body);
+    if (Number(r.size_bytes) > 0 && Number(r.size_bytes) !== b.sizeBytes)
+      throw new HttpError(
+        409,
+        "size_changed",
+        "O arquivo local mudou desde o início do envio.",
+      );
+    try {
+      res.json(await temporary.upload(r, b.sizeBytes, b.durationMs));
+    } catch (e: any) {
+      if (e instanceof HttpError) throw e;
+      console.warn("Tinrec R2 failure", {
+        operation: "temporary-upload",
+        name: typeof e?.name === "string" ? e.name : "unknown",
+        status: e?.$metadata?.httpStatusCode,
+      });
+      throw new HttpError(
+        503,
+        "r2_error",
+        "Não foi possível preparar o envio temporário no R2. Verifique as credenciais e o acesso ao bucket.",
+      );
+    }
+  });
+  app.post("/api/public/:publicId/drive-ready", async (req, res) => {
+    const s = await auth(req, true);
+    const id = z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{32}$/)
+      .parse(req.params.publicId);
+    const {
+      rows: [r],
+    } = await db.query(
+      "SELECT * FROM recordings WHERE public_id=$1 AND owner_id=$2",
+      [id, s.user_id],
+    );
+    if (!r) throw new HttpError(404, "not_found", "Vídeo não encontrado.");
+    if (r.status !== "uploaded")
+      throw new HttpError(
+        409,
+        "upload_incomplete",
+        "Aguarde o término do envio ao Drive antes de confirmar a reprodução.",
+      );
+    // Recheck the durable copy before scheduling removal of the temporary object.
+    await drive.complete(s.user_id, r);
+    await db.query(
+      "UPDATE recordings SET drive_ready_at=COALESCE(drive_ready_at,now()),temp_delete_after=COALESCE(temp_delete_after,now()+interval '24 hours') WHERE id=$1",
+      [r.id],
+    );
+    res.json({ ok: true });
+  });
+  app.get("/api/cron/r2-check", async (req, res) => {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || !same(req.headers.authorization ?? "", `Bearer ${secret}`))
+      throw new HttpError(401, "unauthorized", "Não autorizado.");
+    if (!storage.ready())
+      throw new HttpError(503, "r2_setup", "R2 não configurado.");
+    const key = `diagnostics/${token(24)}.mp4`,
+      body = Buffer.from("Tinrec R2 connectivity check");
+    let uploadId: string | undefined;
+    try {
+      uploadId = await storage.start(key);
+      const put = await fetch(
+        await storage.signPart(key, uploadId, 1, body.length),
+        { method: "PUT", body, signal: AbortSignal.timeout(20000) },
+      );
+      if (!put.ok) throw Error("R2 test upload failed");
+      const parts = await storage.parts(key, uploadId);
+      if (parts.length !== 1 || parts[0].size !== body.length)
+        throw Error("R2 test parts failed");
+      await storage.complete(key, uploadId, parts);
+      uploadId = undefined;
+      if ((await storage.size(key)) !== body.length)
+        throw Error("R2 test HEAD failed");
+      const read = await fetch(await storage.playback(key), {
+        headers: { Range: "bytes=0-5" },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (read.status !== 206 || (await read.text()) !== "Tinrec")
+        throw Error("R2 test Range failed");
+      await storage.remove(key);
+      if ((await storage.size(key)) !== null)
+        throw Error("R2 test deletion failed");
+      res.json({
+        ready: true,
+        upload: true,
+        read: true,
+        range: true,
+        deleted: true,
+      });
+    } finally {
+      if (uploadId) await storage.abort(key, uploadId);
+      await storage.remove(key);
+    }
+  });
+  app.get("/api/cron/temporary-cleanup", async (req, res) => {
+    const secret = process.env.CRON_SECRET;
+    if (!secret || !same(req.headers.authorization ?? "", `Bearer ${secret}`))
+      throw new HttpError(401, "unauthorized", "Não autorizado.");
+    const { rows } = await db.query(
+      "SELECT * FROM recordings WHERE temp_delete_after<=now() AND drive_ready_at IS NOT NULL AND temp_deleted_at IS NULL AND temp_size_bytes>0 ORDER BY temp_delete_after LIMIT 25",
+    );
+    let removed = 0;
+    for (const r of rows) {
+      try {
+        if (await temporary.cleanup(r)) removed++;
+      } catch {
+        console.warn("Tinrec R2 cleanup failed");
+      }
+    }
+    res.json({ removed });
+  });
   app.post("/api/recordings/:id/upload", async (req, res) => {
     const { s, r } = await owned(req);
     const b = z
@@ -443,13 +615,42 @@ export function createApp(
       .parse(req.params.publicId);
     const {
       rows: [r],
-    } = await db.query(
-      "SELECT title,status,uploaded_bytes,size_bytes,drive_file_id FROM recordings WHERE public_id=$1",
-      [id],
-    );
+    } = await db.query("SELECT * FROM recordings WHERE public_id=$1", [id]);
     if (!r)
       throw new HttpError(404, "not_found", "Este vídeo não foi encontrado.");
+    let canConfirmDrive = false;
+    if (cookies(req).tinrec_session) {
+      try {
+        canConfirmDrive = (await auth(req, true)).user_id === r.owner_id;
+      } catch {
+        /* Public playback is independent of library authentication. */
+      }
+    }
+    // Cleanup also runs on access, so already-confirmed copies do not depend on cron alone.
+    if (
+      r.temp_delete_after &&
+      new Date(r.temp_delete_after).getTime() <= Date.now() &&
+      r.drive_ready_at &&
+      !r.temp_deleted_at
+    ) {
+      try {
+        if (await temporary.cleanup(r)) {
+          r.temp_ready = false;
+          r.temp_deleted_at = new Date();
+        }
+      } catch {
+        console.warn("Tinrec R2 cleanup failed");
+      }
+    }
+    const playbackUrl =
+      r.temp_ready && !r.temp_deleted_at && !r.drive_ready_at && storage.ready()
+        ? await storage.playback(`temporary/${r.public_id}.mp4`)
+        : null;
     res.json({
+      playbackUrl,
+      playbackExpiresAt: playbackUrl ? Date.now() + 3600_000 : null,
+      driveReady: !!r.drive_ready_at,
+      canConfirmDrive,
       title: r.title,
       status: r.status,
       progress:
@@ -478,12 +679,10 @@ export function createApp(
       _next: express.NextFunction,
     ) => {
       if (err instanceof z.ZodError) {
-        res
-          .status(400)
-          .json({
-            code: "validation",
-            message: "Verifique os dados enviados.",
-          });
+        res.status(400).json({
+          code: "validation",
+          message: "Verifique os dados enviados.",
+        });
         return;
       }
       if (err instanceof HttpError) {
@@ -494,12 +693,10 @@ export function createApp(
         "Tinrec request failed:",
         err instanceof Error ? err.name : "UnknownError",
       );
-      res
-        .status(500)
-        .json({
-          code: "internal",
-          message: "Não foi possível concluir. Tente novamente em instantes.",
-        });
+      res.status(500).json({
+        code: "internal",
+        message: "Não foi possível concluir. Tente novamente em instantes.",
+      });
     },
   );
   return app;

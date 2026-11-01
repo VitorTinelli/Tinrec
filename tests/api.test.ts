@@ -49,19 +49,56 @@ const create = () =>
     .send({ id: randomUUID(), title: "Atendimento", resolution: 1080 });
 describe("owner boundary and public sharing", () => {
   it("fails closed when setup is missing", async () => {
-    vi.stubEnv("OWNER_EMAIL", "");
+    vi.stubEnv("GOOGLE_CLIENT_ID", "");
     expect((await request(app).get("/api/health")).body.configured).toBe(false);
     expect((await request(app).get("/api/recordings")).status).toBe(503);
   });
-  it("rejects anonymous and another account", async () => {
+  it("rejects anonymous access and isolates authenticated accounts", async () => {
     expect((await request(app).get("/api/recordings")).status).toBe(401);
+    const owner = await create();
+    const other = await request(app)
+      .get("/api/recordings")
+      .auth("other-session", { type: "bearer" });
+    expect(other.status).toBe(200);
+    expect(other.body).toEqual([]);
+    for (const path of ["upload", "complete", "progress", "error"]) {
+      const response = await request(app)
+        .post(`/api/recordings/${owner.body.id}/${path}`)
+        .auth("other-session", { type: "bearer" })
+        .send({});
+      expect(response.status).toBe(404);
+    }
+    const renamed = await request(app)
+      .patch(`/api/recordings/${owner.body.id}`)
+      .auth("other-session", { type: "bearer" })
+      .send({ title: "Outra pessoa" });
+    expect(renamed.status).toBe(404);
+    const collision = await request(app)
+      .post("/api/recordings")
+      .auth("other-session", { type: "bearer" })
+      .send({ id: owner.body.id, title: "Outro", resolution: 1080 });
+    expect(collision.status).toBe(409);
+  });
+  it("revokes only the current desktop session", async () => {
     expect(
       (
         await request(app)
-          .get("/api/recordings")
+          .post("/api/devices/revoke")
+          .auth(device, { type: "bearer" })
+          .send({})
+      ).status,
+    ).toBe(200);
+    expect(
+      (await request(app).get("/api/me").auth(device, { type: "bearer" }))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await request(app)
+          .get("/api/me")
           .auth("other-session", { type: "bearer" })
       ).status,
-    ).toBe(401);
+    ).toBe(200);
   });
   it("creates one recording when a reservation is retried", async () => {
     const first = await create();
@@ -80,7 +117,11 @@ describe("owner boundary and public sharing", () => {
     );
     expect(publicResult.status).toBe(200);
     expect(Object.keys(publicResult.body).sort()).toEqual([
+      "canConfirmDrive",
+      "driveReady",
       "embedUrl",
+      "playbackExpiresAt",
+      "playbackUrl",
       "progress",
       "status",
       "title",
@@ -204,5 +245,49 @@ describe("token encryption", () => {
     const b = Buffer.from(ciphertext, "base64");
     b[30] ^= 1;
     expect(() => decrypt(b.toString("base64"))).toThrow();
+  });
+});
+
+describe("discarding a live capture", () => {
+  it("removes only the owner's unuploaded reservation and is idempotent", async () => {
+    const r = await create(),
+      url = `/api/recordings/${r.body.id}/discard`;
+    expect((await request(app).post(url).send({})).status).toBe(401);
+    expect(
+      (
+        await request(app)
+          .post(url)
+          .auth("other-session", { type: "bearer" })
+          .send({})
+      ).status,
+    ).toBe(200);
+    expect(
+      (await request(app).get(`/api/public/${r.body.publicId}`)).status,
+    ).toBe(200);
+    expect(
+      (await request(app).post(url).auth(device, { type: "bearer" }).send({}))
+        .status,
+    ).toBe(200);
+    expect(
+      (await request(app).post(url).auth(device, { type: "bearer" }).send({}))
+        .status,
+    ).toBe(200);
+    expect(
+      (await request(app).get(`/api/public/${r.body.publicId}`)).status,
+    ).toBe(404);
+  });
+  it("refuses to discard an object that already entered storage", async () => {
+    const r = await create();
+    await sql.query("UPDATE recordings SET temp_size_bytes=100 WHERE id=$1", [
+      r.body.id,
+    ]);
+    expect(
+      (
+        await request(app)
+          .post(`/api/recordings/${r.body.id}/discard`)
+          .auth(device, { type: "bearer" })
+          .send({})
+      ).status,
+    ).toBe(409);
   });
 });

@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import "./style.css";
+import { VideoPlayer, type Playback } from "./VideoPlayer";
 
 type Recording = {
   id: string;
@@ -144,7 +145,7 @@ function Dashboard({
       }
     }
     void load();
-    const t = setInterval(load, 10000);
+    const t = setInterval(load, 2500);
     return () => {
       active = false;
       clearInterval(t);
@@ -723,8 +724,13 @@ function PublicVideo({ id }: { id: string }) {
       status: string;
       progress: number;
       embedUrl: string | null;
+      playbackUrl?: string | null;
+      playbackExpiresAt?: number | null;
+      driveReady?: boolean;
+      canConfirmDrive?: boolean;
     } | null>(null),
     [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     let active = true;
     const get = async () => {
@@ -733,7 +739,19 @@ function PublicVideo({ id }: { id: string }) {
           "/public/" + encodeURIComponent(id),
         );
         if (active) {
-          setVideo(v);
+          setVideo((previous) =>
+            previous?.playbackUrl &&
+            v.playbackUrl &&
+            previous.playbackExpiresAt &&
+            previous.playbackExpiresAt > Date.now() + 120_000 &&
+            previous.driveReady === v.driveReady
+              ? {
+                  ...v,
+                  playbackUrl: previous.playbackUrl,
+                  playbackExpiresAt: previous.playbackExpiresAt,
+                }
+              : v,
+          );
           setError("");
           document.title = v.title + " — Tinrec";
         }
@@ -742,12 +760,12 @@ function PublicVideo({ id }: { id: string }) {
       }
     };
     void get();
-    const t = setInterval(get, 7000);
+    const t = setInterval(get, 2000);
     return () => {
       active = false;
       clearInterval(t);
     };
-  }, [id]);
+  }, [id, refresh]);
   return (
     <div className="public-page">
       <header>
@@ -757,52 +775,65 @@ function PublicVideo({ id }: { id: string }) {
       <main>
         <div className="eyebrow">COMPARTILHADO COM VOCÊ</div>
         <h1>{video?.title ?? "Seu vídeo está aqui"}</h1>
-        <div className="player">
-          {error ? (
-            <div className="full-center">
-              <AlertCircle />
-              <h2>Vídeo indisponível</h2>
-              <p>{error}</p>
-            </div>
-          ) : video?.embedUrl ? (
-            <iframe
-              src={video.embedUrl}
-              title={video.title}
-              allow="autoplay; fullscreen"
-              allowFullScreen
-            />
-          ) : (
-            <div className="full-center">
-              {video?.status === "error" ? (
-                <AlertCircle size={34} />
-              ) : (
-                <LoaderCircle size={34} className="spin" />
-              )}
-              <h2>
-                {video?.status === "error"
-                  ? "O envio precisa de atenção"
-                  : "Seu vídeo está sendo preparado"}
-              </h2>
-              <p>
-                {video?.status === "error"
-                  ? "O autor precisa retomar o envio pelo aplicativo."
-                  : "Você pode deixar esta página aberta. O vídeo aparecerá aqui após o envio."}
-              </p>
-              {video?.status === "uploading" && (
-                <>
-                  <progress max={100} value={video.progress} />
-                  <span>{video.progress}% enviado</span>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+        {!error && (video?.playbackUrl || video?.embedUrl) ? (
+          <VideoPlayer
+            video={video as Playback}
+            publicId={id}
+            onRefresh={() => {
+              setVideo(null);
+              setRefresh((n) => n + 1);
+            }}
+          />
+        ) : (
+          <div className="player">
+            {error ? (
+              <div className="full-center">
+                <AlertCircle />
+                <h2>Vídeo indisponível</h2>
+                <p>{error}</p>
+              </div>
+            ) : video?.embedUrl ? (
+              <iframe
+                src={video.embedUrl}
+                title={video.title}
+                allow="autoplay; fullscreen"
+                allowFullScreen
+              />
+            ) : (
+              <div className="full-center">
+                {video?.status === "error" ? (
+                  <AlertCircle size={34} />
+                ) : (
+                  <LoaderCircle size={34} className="spin" />
+                )}
+                <h2>
+                  {video?.status === "error"
+                    ? "O envio precisa de atenção"
+                    : "Seu vídeo está sendo preparado"}
+                </h2>
+                <p>
+                  {video?.status === "error"
+                    ? "O autor precisa retomar o envio pelo aplicativo."
+                    : "Você pode deixar esta página aberta. O vídeo aparecerá aqui após o envio."}
+                </p>
+                {video?.status === "uploading" && (
+                  <>
+                    <progress max={100} value={video.progress} />
+                    <span>{video.progress}% enviado</span>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <div className="player-note">
           <HardDrive size={17} />
           <p>
-            {video?.embedUrl
-              ? "O Google Drive pode levar alguns minutos para processar o vídeo. Se o player ainda não reproduzir, tente novamente em instantes."
-              : "Armazenado no Google Drive do autor. Compartilhado com Tinrec."}
+            {video?.playbackUrl
+              ? "O link do Tinrec permanece o mesmo durante a troca para o Drive."
+              : video?.embedUrl
+                ? "O Google Drive pode levar alguns minutos para processar o vídeo. Se o player ainda não reproduzir, tente novamente em instantes."
+                : "Armazenado no Google Drive do autor. Compartilhado com Tinrec."}
           </p>
         </div>
       </main>

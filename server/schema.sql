@@ -24,3 +24,13 @@ CREATE TABLE IF NOT EXISTS recordings (
 );
 CREATE INDEX IF NOT EXISTS recordings_owner_created ON recordings(owner_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_size_bytes bigint NOT NULL DEFAULT 0;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_upload_id text;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_ready boolean NOT NULL DEFAULT false;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_created_at timestamptz;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS drive_ready_at timestamptz;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_delete_after timestamptz;
+ALTER TABLE recordings ADD COLUMN IF NOT EXISTS temp_deleted_at timestamptz;
+CREATE TABLE IF NOT EXISTS temporary_budget (id integer PRIMARY KEY CHECK(id=1),used_bytes bigint NOT NULL DEFAULT 0 CHECK(used_bytes>=0));
+INSERT INTO temporary_budget(id) VALUES(1) ON CONFLICT(id) DO NOTHING;
+CREATE INDEX IF NOT EXISTS recordings_temp_cleanup ON recordings(temp_delete_after) WHERE temp_deleted_at IS NULL AND drive_ready_at IS NOT NULL;

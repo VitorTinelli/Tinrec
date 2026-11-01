@@ -9,6 +9,96 @@ export interface Drive {
   complete(userId: string, recording: any): Promise<void>;
   rename(userId: string, fileId: string, title: string): Promise<void>;
 }
+export function driveFailure(status: number, body: any): HttpError {
+  const reasons = [
+    body?.error?.errors?.[0]?.reason,
+    ...(Array.isArray(body?.error?.details)
+      ? body.error.details.map((d: any) => d?.reason)
+      : []),
+  ];
+  if (
+    reasons.some((r) =>
+      ["accessNotConfigured", "SERVICE_DISABLED", "serviceDisabled"].includes(
+        r,
+      ),
+    )
+  )
+    return new HttpError(
+      409,
+      "drive_api_disabled",
+      "A Google Drive API está desativada no projeto Google Cloud do Tinrec. Ative a API no mesmo projeto do cliente OAuth e tente novamente.",
+    );
+  if (
+    status === 401 ||
+    reasons.some((r) =>
+      ["insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"].includes(
+        r,
+      ),
+    )
+  )
+    return new HttpError(
+      409,
+      "google_reconnect",
+      "Reconecte sua conta Google no site e autorize o acesso aos arquivos criados pelo Tinrec. Depois tente o envio novamente.",
+    );
+  if (reasons.includes("storageQuotaExceeded"))
+    return new HttpError(
+      409,
+      "drive_full",
+      "Seu Google Drive está sem espaço. Libere espaço e tente novamente.",
+    );
+  if (
+    reasons.some((r) =>
+      [
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "dailyLimitExceeded",
+      ].includes(r),
+    ) ||
+    status === 429
+  )
+    return new HttpError(
+      503,
+      "drive_rate_limit",
+      "O Google Drive atingiu um limite temporário. O envio será tentado novamente.",
+    );
+  if (reasons.includes("domainPolicy"))
+    return new HttpError(
+      409,
+      "drive_policy",
+      "A organização da sua conta Google bloqueou o acesso ao Drive por aplicativos. Peça ao administrador para permitir o Tinrec.",
+    );
+  if (status === 404)
+    return new HttpError(
+      409,
+      "file_unavailable",
+      "O arquivo não está disponível no Google Drive.",
+    );
+  return new HttpError(
+    409,
+    "drive_error",
+    "O Google Drive não concluiu a operação. Verifique as permissões e tente novamente.",
+  );
+}
+async function verifyDriveResponse(r: Response, operation: string) {
+  if (r.ok) return;
+  const body = await r.json().catch(() => ({}));
+  const error = driveFailure(r.status, body);
+  const reason =
+    body?.error?.errors?.[0]?.reason ??
+    body?.error?.details?.find((d: any) => d?.reason)?.reason;
+  // Never log tokens, request/response bodies, file IDs or resumable upload URLs.
+  console.warn("Tinrec Drive failure", {
+    operation,
+    status: r.status,
+    code: error.code,
+    reason:
+      typeof reason === "string" && /^[A-Za-z0-9_]{1,80}$/.test(reason)
+        ? reason
+        : "unknown",
+  });
+  throw error;
+}
 export function googleDrive(db: Database): Drive {
   async function access(userId: string) {
     const {
@@ -48,33 +138,15 @@ export function googleDrive(db: Database): Drive {
       },
       signal: AbortSignal.timeout(20000),
     });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({}));
-      const reason = e.error?.errors?.[0]?.reason;
-      if (reason === "storageQuotaExceeded")
-        throw new HttpError(
-          409,
-          "drive_full",
-          "Seu Google Drive está sem espaço. Libere espaço e tente novamente.",
-        );
-      if (r.status === 401)
-        throw new HttpError(
-          409,
-          "google_reconnect",
-          "Reconecte sua conta Google.",
-        );
-      if (r.status === 404)
-        throw new HttpError(
-          409,
-          "file_unavailable",
-          "O arquivo não está disponível no Google Drive.",
-        );
-      throw new HttpError(
-        409,
-        "drive_error",
-        "O Google Drive não concluiu a operação. Verifique as permissões e tente novamente.",
-      );
-    }
+    const path = new URL(url).pathname;
+    const operation = path.endsWith("/generateIds")
+      ? "generate-id"
+      : path.endsWith("/permissions")
+        ? "share-file"
+        : path.startsWith("/upload/")
+          ? "start-upload"
+          : `${init.method ?? "GET"}-files`;
+    await verifyDriveResponse(r, operation);
     return r;
   }
   return {
@@ -156,18 +228,9 @@ export function googleDrive(db: Database): Drive {
             signal: AbortSignal.timeout(15000),
           },
         );
-        if (!created.ok && created.status !== 409)
-          throw new HttpError(
-            409,
-            "drive_error",
-            "Não foi possível criar o arquivo no Drive.",
-          );
-      } else if (!exists.ok)
-        throw new HttpError(
-          409,
-          "drive_error",
-          "Não foi possível consultar o arquivo no Drive.",
-        );
+        if (created.status !== 409)
+          await verifyDriveResponse(created, "create-file");
+      } else await verifyDriveResponse(exists, "lookup-file");
       const response = await request(
         `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=resumable`,
         t,
@@ -209,6 +272,19 @@ export function googleDrive(db: Database): Drive {
           "O envio ainda não foi concluído.",
         );
       try {
+        const permissions = await (
+          await request(
+            `https://www.googleapis.com/drive/v3/files/${r.drive_file_id}/permissions?fields=permissions(type,role)`,
+            t,
+          )
+        ).json();
+        if (
+          permissions.permissions?.some(
+            (p: any) =>
+              p.type === "anyone" && ["reader", "writer"].includes(p.role),
+          )
+        )
+          return;
         await request(
           `https://www.googleapis.com/drive/v3/files/${r.drive_file_id}/permissions`,
           t,
@@ -221,7 +297,9 @@ export function googleDrive(db: Database): Drive {
             }),
           },
         );
-      } catch {
+      } catch (error) {
+        if (error instanceof HttpError && error.code !== "drive_error")
+          throw error;
         throw new HttpError(
           409,
           "sharing_blocked",
