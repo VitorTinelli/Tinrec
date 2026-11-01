@@ -40,6 +40,7 @@ impl Encoder {
         height: u32,
         resolution: u32,
         audio: &[AudioTrack],
+        crop: Option<pinray::Rect>,
     ) -> Result<Self> {
         let partial = sidecar(output, ".partial.mp4");
         if output.exists() || partial.exists() {
@@ -100,7 +101,13 @@ impl Encoder {
             "vfr",
             "-vf",
         ])
-        .arg(format!("scale=-2:{resolution}"))
+        .arg(match crop {
+            Some(rect) => format!(
+                "crop={}:{}:{}:{}:exact=1,scale=-2:{resolution}",
+                rect.width, rect.height, rect.x, rect.y
+            ),
+            None => format!("scale=-2:{resolution}"),
+        })
         .args([
             "-c:a",
             "aac",

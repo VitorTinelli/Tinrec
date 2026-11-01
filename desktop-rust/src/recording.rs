@@ -47,6 +47,9 @@ pub enum Control {
     Stop,
     SetMicrophoneMuted(bool),
     SetSystemMuted(bool),
+    SelectArea(pinray::Rect),
+    SetWebcamEnabled(bool),
+    SetWebcamPosition(f64, f64),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,7 +71,28 @@ pub struct PreviewFrame {
     pub rgb: Vec<u8>,
 }
 
-struct Native(CaptureSession);
+enum Source {
+    Screen(CaptureSession),
+    Camera(crate::camera::Camera),
+}
+impl Source {
+    fn next_event(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> std::result::Result<CaptureEvent, pinray::PinrayError> {
+        match self {
+            Self::Screen(session) => session.next_event(timeout),
+            Self::Camera(camera) => camera.next_event(timeout),
+        }
+    }
+    fn stop(&mut self) -> std::result::Result<(), pinray::PinrayError> {
+        match self {
+            Self::Screen(session) => session.stop(),
+            Self::Camera(camera) => camera.stop(),
+        }
+    }
+}
+struct Native(Source);
 impl Drop for Native {
     fn drop(&mut self) {
         let _ = self.0.stop();
@@ -119,14 +143,23 @@ fn audio_packets(
 }
 
 fn preview_frame(bgra: &[u8], width: u32, height: u32) -> Option<PreviewFrame> {
+    resize_preview(bgra, width, height, 480., 270.)
+}
+fn resize_preview(
+    bgra: &[u8],
+    width: u32,
+    height: u32,
+    max_width: f64,
+    max_height: f64,
+) -> Option<PreviewFrame> {
     if width == 0
         || height == 0
         || bgra.len() != usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?
     {
         return None;
     }
-    let scale = (480.0 / f64::from(width))
-        .min(270.0 / f64::from(height))
+    let scale = (max_width / f64::from(width))
+        .min(max_height / f64::from(height))
         .min(1.0);
     let out_width = (f64::from(width) * scale).round().max(1.0) as u32;
     let out_height = (f64::from(height) * scale).round().max(1.0) as u32;
@@ -150,6 +183,8 @@ fn preview_frame(bgra: &[u8], width: u32, height: u32) -> Option<PreviewFrame> {
 
 struct Sink<'a> {
     encoder: Option<Encoder>,
+    webcam: Option<crate::webcam::Webcam>,
+    viewport: Option<pinray::Rect>,
     audio: Vec<AudioTrack>,
     timeline: Timeline,
     limit: Duration,
@@ -162,9 +197,29 @@ struct Sink<'a> {
     muted: [bool; 2],
     preview: Option<&'a dyn Fn(PreviewFrame)>,
     preview_at: Option<Duration>,
+    webcam_preview: Option<&'a dyn Fn(PreviewFrame)>,
+    webcam_preview_at: Option<Duration>,
 }
 impl Sink<'_> {
-    fn video(&mut self, at: Duration, data: Vec<u8>) -> Result<()> {
+    fn video(&mut self, at: Duration, mut data: Vec<u8>) -> Result<()> {
+        let background = data.clone();
+        if let Some(webcam) = &mut self.webcam {
+            webcam.paint(
+                &mut data,
+                self.dimensions.0,
+                self.dimensions.1,
+                self.viewport,
+            )?;
+            if let Some(callback) = self.webcam_preview
+                && self
+                    .webcam_preview_at
+                    .is_none_or(|last| at.saturating_sub(last) >= Duration::from_millis(80))
+                && let Some(frame) = webcam.preview()
+            {
+                callback(frame);
+                self.webcam_preview_at = Some(at);
+            }
+        }
         self.report.captured_video_frames += 1;
         let Some(mapped) = self.timeline.map(at).filter(|t| *t < self.limit) else {
             return Ok(());
@@ -183,7 +238,7 @@ impl Sink<'_> {
         if self.last_video_pts.is_some_and(|p| pts <= p) {
             return Ok(());
         }
-        self.last_frame = Some(data.clone());
+        self.last_frame = Some(background);
         if self.encoder.as_ref().unwrap().send(Packet {
             track: 1,
             pts_ms: pts,
@@ -239,12 +294,12 @@ impl Sink<'_> {
     }
     fn heartbeat(&mut self, elapsed: Duration) -> Result<()> {
         // Damage-driven capture can be completely still. Repeat the last frame
-        // at 1 Hz so the MP4 duration includes still sections and the final second.
+        // at 1 Hz (30 Hz with a webcam) so still screens keep the camera live.
         let active = self.timeline.active(elapsed).min(self.limit);
         if !self.timeline.paused()
-            && self
-                .last_video_pts
-                .is_some_and(|p| active.as_millis() as u64 > p + 1000)
+            && self.last_video_pts.is_some_and(|p| {
+                active.as_millis() as u64 > p + if self.webcam.is_some() { 33 } else { 1000 }
+            })
             && let Some(last) = self.last_frame.clone()
         {
             self.video(elapsed, last)?;
@@ -254,10 +309,18 @@ impl Sink<'_> {
         Ok(())
     }
     fn finish_video(&mut self, active: Duration) -> Result<()> {
-        let data = self
+        let mut data = self
             .last_frame
             .take()
             .context("Nenhum quadro recebido da captura")?;
+        if let Some(webcam) = &mut self.webcam {
+            webcam.paint(
+                &mut data,
+                self.dimensions.0,
+                self.dimensions.1,
+                self.viewport,
+            )?;
+        }
         let pts = active.as_millis().saturating_sub(1) as u64;
         if self.last_video_pts.is_none_or(|p| pts > p) {
             // Finish only after pending packets have drained. Audio overload still fails.
@@ -322,6 +385,16 @@ pub fn run_observed(
     on_progress: impl Fn(Progress),
     preview: Option<&dyn Fn(PreviewFrame)>,
 ) -> Result<Report> {
+    run_observed_with_webcam(options, synthetic, commands, on_progress, preview, None)
+}
+pub fn run_observed_with_webcam(
+    options: &crate::RecordOptions,
+    synthetic: bool,
+    commands: mpsc::Receiver<Control>,
+    on_progress: impl Fn(Progress),
+    preview: Option<&dyn Fn(PreviewFrame)>,
+    webcam_preview: Option<&dyn Fn(PreviewFrame)>,
+) -> Result<Report> {
     validate_options(options)?;
     on_progress(Progress {
         state: "starting",
@@ -331,9 +404,17 @@ pub fn run_observed(
         microphone_muted: false,
         system_muted: false,
     });
-    let mut report=Report { mode:if synthetic {"synthetic"} else {"native"}.into(),
-        platform:std::env::consts::OS.into(), status:"failed".into(),
-        clock_note:"Áudio do sistema e vídeo usam o relógio nativo compartilhado. Microfone CPAL usa relógio monotônico do host com compensação do atraso de callback; alinhamento entre APIs ainda requer teste perceptivo em cada sistema.".into(),..Default::default() };
+    let mut report = Report {
+        mode: if synthetic { "synthetic" } else { "native" }.into(),
+        platform: std::env::consts::OS.into(),
+        status: "failed".into(),
+        clock_note: if options.capture_mode == "camera" || options.webcam.is_some() {
+            "Câmera FFmpeg, áudio nativo e microfone usam APIs independentes alinhadas ao relógio monotônico do host. Latência de dispositivo e sincronização perceptiva precisam ser verificadas em cada sistema.".into()
+        } else {
+            "Áudio do sistema e vídeo usam o relógio nativo compartilhado. Microfone CPAL usa relógio monotônico do host com compensação do atraso de callback; alinhamento entre APIs ainda requer teste perceptivo em cada sistema.".into()
+        },
+        ..Default::default()
+    };
     let result = run_inner(
         options,
         synthetic,
@@ -341,6 +422,7 @@ pub fn run_observed(
         commands,
         &on_progress,
         preview,
+        webcam_preview,
     );
     match result {
         Ok(()) => report.status = "completed".into(),
@@ -366,6 +448,22 @@ pub fn validate_options(options: &crate::RecordOptions) -> Result<()> {
     {
         bail!("Configuração de captura inválida");
     }
+    if !["screen", "window", "area", "camera"].contains(&options.capture_mode.as_str()) {
+        bail!("Modo de captura inválido");
+    }
+    if !options.webcam_x.is_finite()
+        || !options.webcam_y.is_finite()
+        || !(0.0..=1.0).contains(&options.webcam_x)
+        || !(0.0..=1.0).contains(&options.webcam_y)
+    {
+        bail!("Posição da webcam inválida");
+    }
+    if options.crop.is_some() && options.capture_mode != "area" {
+        bail!("Recorte só pode ser usado no modo área.");
+    }
+    if let Some(crop) = &options.crop {
+        parse_crop(crop)?;
+    }
     if !["auto", "wayland", "x11", "wgc", "dxgi"].contains(&options.backend.as_str()) {
         bail!("Backend inválido");
     }
@@ -378,6 +476,7 @@ pub fn validate_options(options: &crate::RecordOptions) -> Result<()> {
         ".ffmpeg.log",
         ".capture.json",
         ".ffprobe.json",
+        ".camera.log",
     ] {
         if crate::encoder::sidecar(&options.output, suffix).exists() {
             bail!("O destino já existe. Escolha outro nome.");
@@ -386,6 +485,39 @@ pub fn validate_options(options: &crate::RecordOptions) -> Result<()> {
     Ok(())
 }
 
+pub fn parse_crop(value: &str) -> Result<pinray::Rect> {
+    let numbers: Vec<u32> = value
+        .split(',')
+        .map(str::parse)
+        .collect::<std::result::Result<_, _>>()
+        .context("Área inválida. Use x,y,largura,altura.")?;
+    if numbers.len() != 4
+        || numbers[0] > i32::MAX as u32
+        || numbers[1] > i32::MAX as u32
+        || numbers[2] < 2
+        || numbers[3] < 2
+    {
+        bail!("Área inválida");
+    }
+    Ok(pinray::Rect {
+        x: numbers[0] as i32,
+        y: numbers[1] as i32,
+        width: numbers[2],
+        height: numbers[3],
+    })
+}
+fn validate_crop(rect: pinray::Rect, width: u32, height: u32) -> Result<()> {
+    if rect.x < 0
+        || rect.y < 0
+        || rect.width < 2
+        || rect.height < 2
+        || rect.x as u64 + rect.width as u64 > width as u64
+        || rect.y as u64 + rect.height as u64 > height as u64
+    {
+        bail!("A área deve estar dentro da fonte selecionada.");
+    }
+    Ok(())
+}
 fn run_inner(
     options: &crate::RecordOptions,
     synthetic: bool,
@@ -393,7 +525,11 @@ fn run_inner(
     commands: mpsc::Receiver<Control>,
     on_progress: &impl Fn(Progress),
     preview: Option<&dyn Fn(PreviewFrame)>,
+    webcam_preview: Option<&dyn Fn(PreviewFrame)>,
 ) -> Result<()> {
+    if options.capture_mode == "area" && options.crop.is_none() && preview.is_none() {
+        bail!("Na CLI, informe --crop x,y,largura,altura para gravar uma área.");
+    }
     let mut native = if synthetic {
         None
     } else {
@@ -406,22 +542,121 @@ fn run_inner(
             "dxgi" => BackendPreference::WindowsDxgi,
             _ => unreachable!(),
         };
-        let mut builder = CaptureSession::builder()
-            .video_target(VideoCaptureTarget::Display(SourceId::new(&options.display)))
-            .backend_preference(backend)
-            .pixel_format(PixelFormat::Bgra8888)
-            .frame_rate(Some(30))
-            .queue_depth(4);
-        if options.system_audio {
-            builder = builder.audio(AudioCapture::SystemMix);
+        if options.capture_mode == "camera" {
+            report.backend =
+                "Camera via FFmpeg + native system audio; host-aligned independent clocks".into();
+            Some(Native(Source::Camera(crate::camera::Camera::start(
+                options, backend,
+            )?)))
+        } else {
+            let target = if options.capture_mode == "window" {
+                VideoCaptureTarget::Window(SourceId::new(&options.display))
+            } else {
+                VideoCaptureTarget::Display(SourceId::new(&options.display))
+            };
+            let mut builder = CaptureSession::builder()
+                .video_target(target)
+                .backend_preference(backend)
+                .pixel_format(PixelFormat::Bgra8888)
+                .frame_rate(Some(30))
+                .queue_depth(4);
+            if options.system_audio {
+                builder = builder.audio(AudioCapture::SystemMix);
+            }
+            let mut session = builder.build()?;
+            report.backend = format!("{:?}", session.backend_info());
+            session.start()?;
+            Some(Native(Source::Screen(session)))
         }
-        let mut native = Native(builder.build()?);
-        report.backend = format!("{:?}", native.0.backend_info());
-        native.0.start()?;
-        Some(native)
     };
     if synthetic {
         report.backend = "synthetic BGRA + distinct 440/880 Hz tones (no hardware capture)".into();
+    }
+    let crop = if options.capture_mode == "area" {
+        if let Some(crop) = &options.crop {
+            Some(parse_crop(crop)?)
+        } else {
+            let callback = preview.context("A seleção interativa de área requer o aplicativo. Na CLI, use --crop x,y,largura,altura.")?;
+            let frame = if let Some(native) = native.as_mut() {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                loop {
+                    if commands
+                        .try_iter()
+                        .any(|command| matches!(command, Control::Stop))
+                    {
+                        bail!("Seleção de área cancelada");
+                    }
+                    if Instant::now() >= deadline {
+                        bail!("Não chegou imagem para selecionar a área.");
+                    }
+                    match native.0.next_event(Some(Duration::from_millis(20))) {
+                        Ok(CaptureEvent::Video(frame)) => {
+                            break resize_preview(
+                                &frame.to_tight_bytes().context("Imagem indisponível")?,
+                                frame.width,
+                                frame.height,
+                                1440.,
+                                900.,
+                            )
+                            .context("Imagem inválida")?;
+                        }
+                        Err(pinray::PinrayError::Timeout(_)) => {}
+                        Err(error) => return Err(error.into()),
+                        Ok(CaptureEvent::End) => bail!("Captura encerrada"),
+                        _ => {}
+                    }
+                }
+            } else {
+                preview_frame(&synthetic_frame(0), 640, 360).unwrap()
+            };
+            callback(frame.clone());
+            loop {
+                match commands.try_recv() {
+                    Ok(Control::SelectArea(rect)) => {
+                        validate_crop(rect, frame.source_width, frame.source_height)?;
+                        break Some(rect);
+                    }
+                    Ok(Control::Stop) | Err(mpsc::TryRecvError::Disconnected) => {
+                        bail!("Seleção de área cancelada")
+                    }
+                    _ => {}
+                }
+                if let Some(native) = native.as_mut() {
+                    match native.0.next_event(Some(Duration::from_millis(20))) {
+                        Err(pinray::PinrayError::Timeout(_)) => {}
+                        Err(error) => return Err(error.into()),
+                        Ok(CaptureEvent::End) => bail!("Captura encerrada"),
+                        _ => {}
+                    }
+                } else {
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let webcam = crate::webcam::Webcam::start(options, synthetic, &commands)?;
+    // Flush frames from before confirmation, so the selection dialog cannot
+    // become the first recorded frames of the chosen region.
+    if ((options.capture_mode == "area" && options.crop.is_none()) || options.webcam.is_some())
+        && let Some(native) = native.as_mut()
+    {
+        let deadline = Instant::now() + Duration::from_millis(150);
+        while Instant::now() < deadline {
+            if commands
+                .try_iter()
+                .any(|command| matches!(command, Control::Stop))
+            {
+                bail!("Seleção de área cancelada");
+            }
+            match native.0.next_event(Some(Duration::from_millis(10))) {
+                Err(pinray::PinrayError::Timeout(_)) => {}
+                Err(error) => return Err(error.into()),
+                Ok(CaptureEvent::End) => bail!("Captura encerrada"),
+                _ => {}
+            }
+        }
     }
     let epoch = Instant::now();
     let mic = if options.microphone && !synthetic {
@@ -436,6 +671,7 @@ fn run_inner(
     let mut first_video = None;
     let mut first_audio = None;
     let mut clock = NativeClock { anchor: None };
+    let mut camera_clock = NativeClock { anchor: None };
     let dimensions = if let Some(native) = native.as_mut() {
         let deadline = Instant::now() + Duration::from_secs(20);
         while first_video.is_none() || (options.system_audio && first_audio.is_none()) {
@@ -449,7 +685,11 @@ fn run_inner(
             }
             match native.0.next_event(Some(Duration::from_millis(20))) {
                 Ok(CaptureEvent::Video(frame)) => {
-                    let at = clock.map(frame.stream_time_ns, epoch.elapsed());
+                    let at = if options.capture_mode == "camera" {
+                        camera_clock.map(frame.stream_time_ns, epoch.elapsed())
+                    } else {
+                        clock.map(frame.stream_time_ns, epoch.elapsed())
+                    };
                     if first_video.is_none() {
                         first_video = Some((at, frame));
                     }
@@ -495,6 +735,9 @@ fn run_inner(
             name: "Microphone",
         });
     }
+    if let Some(crop) = crop {
+        validate_crop(crop, dimensions.0, dimensions.1)?;
+    }
     let encoder = Encoder::start(
         &options.output,
         &options.ffmpeg,
@@ -502,10 +745,13 @@ fn run_inner(
         dimensions.1,
         options.resolution,
         &tracks,
+        crop,
     )?;
     let mut meter = Meter::new(encoder.pid());
     let mut sink = Sink {
         encoder: Some(encoder),
+        webcam,
+        viewport: crop,
         audio: tracks,
         timeline: Timeline::default(),
         limit: Duration::from_secs_f64(options.duration),
@@ -515,8 +761,14 @@ fn run_inner(
         dimensions,
         last_audio_pts: [None, None],
         muted: [false, false],
-        preview,
+        preview: if options.capture_mode == "area" {
+            None
+        } else {
+            preview
+        },
         preview_at: None,
+        webcam_preview,
+        webcam_preview_at: None,
         volumes: [
             if options.system_audio {
                 options.system_volume
@@ -553,6 +805,17 @@ fn run_inner(
             let mut stopped = false;
             for command in commands.try_iter() {
                 match command {
+                    Control::SetWebcamEnabled(enabled) => {
+                        if let Some(webcam) = &mut sink.webcam {
+                            webcam.set_enabled(enabled, options, synthetic)?;
+                        }
+                    }
+                    Control::SetWebcamPosition(x, y) => {
+                        if let Some(webcam) = &mut sink.webcam {
+                            webcam.set_position(x, y);
+                        }
+                    }
+                    Control::SelectArea(_) => {}
                     Control::Pause => sink.timeline.pause(elapsed),
                     Control::Resume => sink.timeline.resume(elapsed),
                     Control::Stop => stopped = true,
@@ -629,7 +892,11 @@ fn run_inner(
                         {
                             bail!("Formato/resolução da captura mudou; reinicie a gravação.");
                         }
-                        let at = clock.map(frame.stream_time_ns, epoch.elapsed());
+                        let at = if options.capture_mode == "camera" {
+                            camera_clock.map(frame.stream_time_ns, epoch.elapsed())
+                        } else {
+                            clock.map(frame.stream_time_ns, epoch.elapsed())
+                        };
                         sink.video(
                             at,
                             frame
@@ -691,6 +958,7 @@ fn run_inner(
             system_muted: options.system_audio && sink.muted[0],
         });
         sink.finish_video(active)?;
+        sink.webcam.take();
         sink.report.active_seconds = active.as_secs_f64();
         sink.report.wall_seconds = stopped_at.as_secs_f64();
         sink.report

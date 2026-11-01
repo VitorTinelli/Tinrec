@@ -1220,8 +1220,6 @@ dependencies = [
 [[package]]
 name = "pinray-platform-linux"
 version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66bdd404e1b885dbb9067207d788c7ec5d5abbc5facef9483ea66d8ab69da2e0"
 dependencies = [
  "pinray-core",
  "pipewire",

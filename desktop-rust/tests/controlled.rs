@@ -6,6 +6,13 @@ use tinrec_capture::{
 
 fn options(output: &Path) -> RecordOptions {
     RecordOptions {
+        capture_mode: "screen".into(),
+        crop: None,
+        webcam: None,
+        webcam_disabled: false,
+        webcam_visible_in_capture: false,
+        webcam_x: 0.0,
+        webcam_y: 1.0,
         fast_finalize: true,
         output: output.to_owned(),
         duration: 10.0,
@@ -178,4 +185,190 @@ fn live_preview_and_mute_controls_affect_the_recorded_audio() {
             both.active_seconds - 0.35
         ) < 0.001
     );
+}
+
+#[test]
+#[ignore = "requires FFmpeg and ffprobe"]
+fn area_selection_happens_before_recording_and_output_is_cropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("area.mp4");
+    let mut config = options(&output);
+    config.capture_mode = "area".into();
+    config.system_audio = false;
+    config.microphone = false;
+    config.duration = 0.5;
+    let (sender, receiver) = mpsc::channel();
+    let report = recording::run_observed(
+        &config,
+        true,
+        receiver,
+        |_| {},
+        Some(&|frame| {
+            assert_eq!((frame.source_width, frame.source_height), (640, 360));
+            thread::sleep(Duration::from_millis(350));
+            sender
+                .send(Control::SelectArea(pinray::Rect {
+                    x: 101,
+                    y: 50,
+                    width: 161,
+                    height: 160,
+                }))
+                .unwrap();
+        }),
+    )
+    .unwrap();
+    assert_eq!(report.status, "completed", "{:?}", report.error);
+    assert!(report.active_seconds < 0.7);
+    let probe = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+        ])
+        .arg(&output)
+        .output()
+        .unwrap();
+    let probe: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+    assert_eq!(probe["streams"][0]["width"], 724);
+    assert_eq!(probe["streams"][0]["height"], 720);
+}
+#[test]
+#[ignore = "requires FFmpeg and ffprobe"]
+fn cancelling_area_selection_does_not_create_a_video() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("cancel.mp4");
+    let mut config = options(&output);
+    config.capture_mode = "area".into();
+    let (sender, receiver) = mpsc::channel();
+    let report = recording::run_observed(
+        &config,
+        true,
+        receiver,
+        |_| {},
+        Some(&|_| {
+            sender.send(Control::Stop).unwrap();
+        }),
+    )
+    .unwrap();
+    assert_eq!(report.status, "failed");
+    assert!(!output.exists());
+    assert!(!tinrec_capture::encoder::sidecar(&output, ".partial.mp4").exists());
+}
+
+#[test]
+#[ignore = "requires FFmpeg and ffprobe"]
+fn webcam_is_embedded_inside_the_cropped_video() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("webcam.mp4");
+    let mut config = options(&output);
+    config.capture_mode = "area".into();
+    config.crop = Some("100,50,320,240".into());
+    config.webcam = Some("generated".into());
+    config.system_audio = false;
+    config.microphone = false;
+    config.duration = 0.5;
+    let (_sender, receiver) = mpsc::channel();
+    let report = recording::run_controlled(&config, true, receiver, |_| {}).unwrap();
+    assert_eq!(report.status, "completed", "{:?}", report.error);
+    let decoded = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&output)
+        .args([
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(decoded.status.success());
+    assert_eq!(decoded.stdout.len(), 960 * 720 * 3);
+    let center = (630 * 960 + 90) * 3;
+    let pixel = &decoded.stdout[center..center + 3];
+    assert!(
+        pixel[0] < 20 && pixel[1] < 20 && pixel[2] > 230,
+        "{pixel:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires FFmpeg and ffprobe"]
+fn webcam_can_toggle_move_and_toggle_back_during_recording() {
+    use std::cell::Cell;
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("webcam-controls.mp4");
+    let mut config = options(&output);
+    config.webcam = Some("generated".into());
+    config.webcam_disabled = true;
+    config.system_audio = false;
+    config.microphone = false;
+    config.duration = 2.4;
+    let (sender, receiver) = mpsc::channel();
+    let stage = Cell::new(0);
+    let previews = Cell::new(0);
+    let report = recording::run_observed_with_webcam(
+        &config,
+        true,
+        receiver,
+        |progress| {
+            let schedule = [
+                (0.2, Control::SetWebcamEnabled(true)),
+                (0.7, Control::SetWebcamPosition(1., 0.)),
+                (1.2, Control::SetWebcamEnabled(false)),
+                (1.7, Control::SetWebcamEnabled(true)),
+            ];
+            let index = stage.get();
+            if index < schedule.len() && progress.active_seconds >= schedule[index].0 {
+                sender.send(schedule[index].1).unwrap();
+                stage.set(index + 1);
+            }
+        },
+        None,
+        Some(&|frame| {
+            assert_eq!(&frame.rgb[..3], &[0, 0, 255]);
+            previews.set(previews.get() + 1);
+        }),
+    )
+    .unwrap();
+    assert_eq!(report.status, "completed", "{:?}", report.error);
+    assert_eq!(stage.get(), 4);
+    assert!(previews.get() > 5);
+    for (time, bottom_left, top_right) in [
+        (0.05, false, false),
+        (0.5, true, false),
+        (1.0, false, true),
+        (1.5, false, false),
+        (2.1, false, true),
+    ] {
+        let decoded = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-ss", &time.to_string(), "-i"])
+            .arg(&output)
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        assert_eq!(decoded.stdout.len(), 1280 * 720 * 3);
+        for (x, y, expected) in [(90, 630, bottom_left), (1190, 90, top_right)] {
+            let offset = (y * 1280 + x) * 3;
+            let pixel = &decoded.stdout[offset..offset + 3];
+            let blue = pixel[0] < 20 && pixel[1] < 20 && pixel[2] > 230;
+            assert_eq!(blue, expected, "t={time}, ({x},{y}), {pixel:?}");
+        }
+    }
 }

@@ -1,9 +1,11 @@
 pub mod audio;
+pub mod camera;
 pub mod diagnostics;
 pub mod encoder;
 mod matroska;
 pub mod recording;
 mod timeline;
+mod webcam;
 
 use clap::Args;
 use std::path::PathBuf;
@@ -32,6 +34,23 @@ pub struct RecordOptions {
     pub microphone_device: Option<String>,
     #[arg(long, default_value = "auto")]
     pub display: String,
+    #[arg(long, default_value="screen", value_parser=["screen","window","area","camera"])]
+    pub capture_mode: String,
+    /// Recorte em pixels da fonte: x,y,largura,altura. Sem valor, a GUI pede a seleção.
+    #[arg(long)]
+    pub crop: Option<String>,
+    /// Camera device embedded over screen, window or area capture.
+    #[arg(long)]
+    pub webcam: Option<String>,
+    #[arg(long)]
+    pub webcam_disabled: bool,
+    /// Desktop preview is already present in the screen capture (Linux).
+    #[arg(long, hide = true)]
+    pub webcam_visible_in_capture: bool,
+    #[arg(long, default_value_t = 0.0)]
+    pub webcam_x: f64,
+    #[arg(long, default_value_t = 1.0)]
+    pub webcam_y: f64,
     #[arg(long,default_value="auto",value_parser=["auto","wayland","x11","wgc","dxgi"])]
     pub backend: String,
     #[arg(long,default_value="720",value_parser=parse_resolution)]
