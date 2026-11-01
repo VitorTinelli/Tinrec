@@ -39,6 +39,8 @@ pub struct Job {
     #[serde(default)]
     pub temporary_note: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    remove_local_after_upload: bool,
     attempts: u32,
     next_retry: u64,
 }
@@ -199,6 +201,29 @@ impl Cloud {
         }
         Ok(value)
     }
+    pub fn recording_url(&self, path: &Path) -> Reply<String> {
+        let i = lock(&self.inner)?;
+        let account = &i
+            .auth
+            .as_ref()
+            .ok_or("Conecte sua conta Google em Configurações para abrir este vídeo no site.")?
+            .account;
+        let job = i
+            .saved
+            .jobs
+            .iter()
+            .rev()
+            .find(|job| {
+                &job.account == account
+                    && job.status != "discarded"
+                    && (job.path == path
+                        || fs::canonicalize(&job.path).is_ok_and(|value| value == path))
+            })
+            .ok_or("Este vídeo ainda não foi enviado ao site pela conta conectada.")?;
+        job.url.clone().ok_or(
+            "O link deste vídeo ainda está sendo preparado. Tente novamente em instantes.".into(),
+        )
+    }
     pub fn connect(&self) -> Reply<String> {
         let _operation = lock(&self.operation)?;
         let i = lock(&self.inner)?;
@@ -290,9 +315,21 @@ impl Cloud {
             temporary_bytes: 0,
             temporary_note: None,
             error: None,
+            remove_local_after_upload: false,
             attempts: 0,
             next_retry: 0,
         });
+        self.persist(&i)
+    }
+    pub fn remove_local_after_upload(&self, id: &str) -> Reply<()> {
+        let mut i = lock(&self.inner)?;
+        let job = i
+            .saved
+            .jobs
+            .iter_mut()
+            .find(|job| job.id == id)
+            .ok_or("Envio não encontrado")?;
+        job.remove_local_after_upload = true;
         self.persist(&i)
     }
     pub fn finish(&self, id: &str, duration: f64, success: bool) -> Reply<()> {
@@ -421,7 +458,8 @@ impl Cloud {
         let Some(index) = i.saved.jobs.iter().position(|j| {
             j.account == a.account
                 && j.next_retry <= now_ms()
-                && ((j.status == "recording" && j.url.is_none())
+                && ((j.status == "uploaded" && j.remove_local_after_upload)
+                    || (j.status == "recording" && j.url.is_none())
                     || ["queued", "uploading", "error", "failed", "discarded"]
                         .contains(&j.status.as_str()))
         }) else {
@@ -437,7 +475,7 @@ impl Cloud {
             job.attempts = job.attempts.saturating_add(1);
             job.next_retry =
                 now_ms() + (10_000u64.saturating_mul(1u64 << job.attempts.min(5))).min(300_000);
-            if !["recording", "failed", "discarded"].contains(&job.status.as_str()) {
+            if !["recording", "failed", "discarded", "uploaded"].contains(&job.status.as_str()) {
                 job.status = "error".into();
             }
         }
@@ -457,6 +495,20 @@ impl Cloud {
         }
     }
     fn step(&self, a: &Auth, j: &mut Job) -> Reply<()> {
+        if j.status == "uploaded" && j.remove_local_after_upload {
+            let pending = self
+                .file
+                .parent()
+                .ok_or("Pasta de dados indisponível")?
+                .join("pending-recordings");
+            if j.path.parent() != Some(pending.as_path()) {
+                return Err("Limpeza restrita à pasta temporária do Tinrec.".into());
+            }
+            crate::discard_files(&j.path)?;
+            j.remove_local_after_upload = false;
+            j.error = None;
+            return Ok(());
+        }
         let base = format!("/recordings/{}", j.id);
         if j.status == "discarded" {
             // A reservation can have reached the server even when its response was lost.
@@ -779,6 +831,78 @@ mod tests {
             account: account.into(),
         });
         i.saved.account = Some(account.into());
+    }
+    #[test]
+    fn temporary_local_copy_is_preserved_until_confirmed_and_policy_survives_restart() {
+        let (c, dir) = test_cloud();
+        authenticate(&c, "first");
+        let pending = dir.join("pending-recordings");
+        fs::create_dir_all(&pending).unwrap();
+        let path = pending.join("test.mp4");
+        fs::write(&path, b"video").unwrap();
+        let report = tinrec_capture::encoder::sidecar(&path, ".capture.json");
+        fs::write(&report, b"{}").unwrap();
+        c.enqueue("id".into(), path.clone(), "test".into(), 1080, 0., true)
+            .unwrap();
+        c.remove_local_after_upload("id").unwrap();
+        let saved: Saved =
+            serde_json::from_slice(&fs::read(dir.join("uploads.json")).unwrap()).unwrap();
+        assert!(saved.jobs[0].remove_local_after_upload);
+        let auth = c.inner.lock().unwrap().auth.clone().unwrap();
+        let mut job = saved.jobs[0].clone();
+        job.status = "failed".into();
+        c.step(&auth, &mut job).unwrap();
+        assert!(path.exists());
+        assert!(report.exists());
+        job.status = "uploaded".into();
+        c.step(&auth, &mut job).unwrap();
+        assert!(!path.exists());
+        assert!(!report.exists());
+        assert!(!job.remove_local_after_upload);
+        // Repeating cleanup after a crash between removal and persistence is safe.
+        job.remove_local_after_upload = true;
+        c.step(&auth, &mut job).unwrap();
+        let kept = dir.join("kept.mp4");
+        fs::write(&kept, b"keep").unwrap();
+        job.path = kept.clone();
+        job.remove_local_after_upload = true;
+        assert!(c.step(&auth, &mut job).is_err());
+        assert!(kept.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn recording_links_match_the_file_and_connected_account() {
+        let (c, dir) = test_cloud();
+        authenticate(&c, "first");
+        let first = dir.join("one").join("video.mp4");
+        let second = dir.join("two").join("video.mp4");
+        for path in [&first, &second] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"video").unwrap();
+        }
+        c.enqueue("one".into(), first.clone(), "video".into(), 1080, 1., false)
+            .unwrap();
+        c.enqueue(
+            "two".into(),
+            second.clone(),
+            "video".into(),
+            1080,
+            1.,
+            false,
+        )
+        .unwrap();
+        {
+            let mut i = c.inner.lock().unwrap();
+            i.saved.jobs[0].url = Some(format!("{SITE}/v/one"));
+            i.saved.jobs[1].url = Some(format!("{SITE}/v/two"));
+        }
+        assert_eq!(c.recording_url(&first).unwrap(), format!("{SITE}/v/one"));
+        assert_eq!(c.recording_url(&second).unwrap(), format!("{SITE}/v/two"));
+        authenticate(&c, "another");
+        assert!(c.recording_url(&first).is_err());
+        c.inner.lock().unwrap().auth = None;
+        assert!(c.recording_url(&first).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn queue_survives_restart_and_isolates_accounts() {
