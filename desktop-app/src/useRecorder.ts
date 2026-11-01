@@ -1,3 +1,10 @@
+import {
+  defaultRecordingName,
+  captureType,
+  resolveRecordingName,
+  recordingSource,
+  recordingNameError,
+} from "./recordingName";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   busy,
@@ -7,13 +14,19 @@ import {
   subscribe,
   type Snapshot,
   type Sources,
+  type CaptureMode,
   type Tools,
   type Settings,
   type RecordingFile,
 } from "./bridge";
 
 const defaults: Settings = {
-  title: "",
+  captureMode: "screen",
+  window: "",
+  camera: "",
+  webcamEnabled: false,
+  keepLocal: true,
+  title: defaultRecordingName,
   display: "auto",
   microphoneDevice: null,
   microphone: true,
@@ -24,12 +37,25 @@ const defaults: Settings = {
 };
 function loadSettings(): Settings {
   try {
+    const saved = localStorage.getItem("tinrec.recorder.v2");
     const data: Partial<Settings> = JSON.parse(
-      localStorage.getItem("tinrec.recorder.v1") ?? "{}",
+      saved ?? localStorage.getItem("tinrec.recorder.v1") ?? "{}",
     );
     return {
       ...defaults,
-      title: "",
+      captureMode: ["screen", "window", "area", "camera"].includes(
+        data.captureMode ?? "",
+      )
+        ? data.captureMode!
+        : "screen",
+      window: typeof data.window === "string" ? data.window : "",
+      webcamEnabled: data.webcamEnabled === true,
+      camera: typeof data.camera === "string" ? data.camera : "",
+      keepLocal: typeof data.keepLocal === "boolean" ? data.keepLocal : true,
+      title:
+        typeof data.title === "string" && (saved !== null || data.title.trim())
+          ? data.title
+          : defaultRecordingName,
       display: typeof data.display === "string" ? data.display : "auto",
       microphoneDevice:
         typeof data.microphoneDevice === "string"
@@ -61,6 +87,24 @@ export function useRecorder() {
   const [pending, setPending] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const mounted = useRef(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameras, setCameras] = useState<{ id: string; name: string }[]>([]);
+  const captureSources = sources ? { ...sources, cameras } : null;
+  const refreshCameras = useCallback(async () => {
+    setCameraLoading(true);
+    try {
+      const cameras = await call<{ id: string; name: string }[]>("get_cameras");
+      if (mounted.current) setCameras(cameras);
+    } catch (error) {
+      if (mounted.current) setError(message(error));
+    } finally {
+      if (mounted.current) setCameraLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (settings.captureMode === "camera" || settings.webcamEnabled)
+      void refreshCameras();
+  }, [settings.captureMode, settings.webcamEnabled, refreshCameras]);
   const accept = useCallback((next: Snapshot) => {
     if (mounted.current)
       setSnapshot((previous) =>
@@ -123,10 +167,7 @@ export function useRecorder() {
   }, [accept, refresh]);
   useEffect(() => {
     try {
-      localStorage.setItem(
-        "tinrec.recorder.v1",
-        JSON.stringify({ ...settings, title: "" }),
-      );
+      localStorage.setItem("tinrec.recorder.v2", JSON.stringify(settings));
     } catch {
       /* Settings remain available in memory. */
     }
@@ -152,9 +193,11 @@ export function useRecorder() {
   }
   return {
     settings,
+    cameraLoading,
+    refreshCameras,
     update,
     snapshot,
-    sources,
+    sources: captureSources,
     tools,
     folder,
     files,
@@ -163,10 +206,39 @@ export function useRecorder() {
     loading,
     active: busy(snapshot.phase),
     refresh,
-    start: () =>
-      act("start", async () =>
-        accept(await call<Snapshot>("start_recording", { request: settings })),
-      ),
+    start: (mode?: CaptureMode, overrides: Partial<Settings> = {}) =>
+      act("start", async () => {
+        const request = {
+          ...settings,
+          ...overrides,
+          captureMode: mode ?? settings.captureMode,
+        };
+        if (
+          request.captureMode === "window" &&
+          !sources?.wayland &&
+          !request.window
+        )
+          throw new Error("Escolha uma janela para gravar.");
+        if (
+          (request.captureMode === "camera" || request.webcamEnabled) &&
+          !request.camera
+        )
+          throw new Error("Escolha uma câmera para gravar.");
+        const title = resolveRecordingName(
+          request.title,
+          new Date(),
+          recordingSource(request, captureSources),
+          crypto.randomUUID().replaceAll("-", "").slice(0, 6),
+          captureType(request.captureMode),
+        );
+        const error = recordingNameError(settings.title, title);
+        if (error) throw new Error(error);
+        accept(
+          await call<Snapshot>("start_recording", {
+            request: { ...request, title },
+          }),
+        );
+      }),
     control: (action: string) =>
       act(action, async () =>
         accept(await call<Snapshot>("control_recording", { action })),

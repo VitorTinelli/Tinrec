@@ -11,6 +11,8 @@ import {
   GripVertical,
   PanelTop,
   AlertCircle,
+  Video,
+  VideoOff,
 } from "lucide-react";
 import {
   call,
@@ -217,6 +219,22 @@ export function FloatingRecorder() {
           disabled={disabled}
           onControl={(action) => void act(action)}
         />
+        <button
+          className={`live-control ${snapshot.webcamEnabled ? "" : "is-muted"}`}
+          aria-label={
+            snapshot.webcamEnabled ? "Desativar webcam" : "Ativar webcam"
+          }
+          title={snapshot.webcamEnabled ? "Desativar webcam" : "Ativar webcam"}
+          aria-pressed={!!snapshot.webcamEnabled}
+          disabled={disabled || !snapshot.webcamAvailable}
+          onClick={() => void act("toggle-webcam")}
+        >
+          {snapshot.webcamEnabled ? (
+            <Video size={17} />
+          ) : (
+            <VideoOff size={17} />
+          )}
+        </button>
         <DiscardControl
           key={snapshot.sessionId ?? "idle"}
           disabled={

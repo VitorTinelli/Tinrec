@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod shortcuts;
 mod tray;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,8 @@ struct Snapshot {
     system_enabled: bool,
     microphone_muted: bool,
     system_muted: bool,
+    webcam_available: bool,
+    webcam_enabled: bool,
 }
 impl Snapshot {
     fn busy(&self) -> bool {
@@ -67,11 +70,15 @@ struct Session {
     exit_requested: bool,
     discard_requested: bool,
     preview: Option<Preview>,
+    capture_mode: String,
+    webcam_preview: Option<Preview>,
 }
 struct AppState {
     session: Mutex<Session>,
     folder: Mutex<PathBuf>,
     config: PathBuf,
+    webcam_position: Mutex<(f64, f64)>,
+    webcam_region: Mutex<Option<(f64, f64, f64, f64)>>,
     cloud: Arc<cloud::Cloud>,
     exiting: AtomicBool,
 }
@@ -91,12 +98,18 @@ struct Display {
     height: u32,
 }
 #[derive(Serialize)]
+struct NamedSource {
+    id: String,
+    name: String,
+}
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Sources {
     synthetic: bool,
     platform: String,
     wayland: bool,
     displays: Vec<Display>,
+    windows: Vec<NamedSource>,
     microphones: Vec<String>,
     warnings: Vec<String>,
 }
@@ -108,9 +121,25 @@ struct Tools {
     ready: bool,
     message: Option<String>,
 }
+fn default_capture_mode() -> String {
+    "screen".into()
+}
+fn default_keep_local() -> bool {
+    true
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StartRequest {
+    #[serde(default = "default_keep_local")]
+    keep_local: bool,
+    #[serde(default = "default_capture_mode")]
+    capture_mode: String,
+    #[serde(default)]
+    window: String,
+    #[serde(default)]
+    camera: String,
+    #[serde(default)]
+    webcam_enabled: bool,
     title: String,
     display: String,
     microphone_device: Option<String>,
@@ -146,6 +175,13 @@ fn emit(app: &tauri::AppHandle, snapshot: &Snapshot) {
             if !window.is_visible().unwrap_or(false) {
                 let _ = window.show();
             }
+        } else {
+            let _ = window.hide();
+        }
+    }
+    if let Some(window) = app.get_webview_window("webcam") {
+        if matches!(snapshot.phase.as_str(), "recording" | "paused") && snapshot.webcam_enabled {
+            let _ = window.show();
         } else {
             let _ = window.hide();
         }
@@ -270,29 +306,38 @@ async fn get_sources() -> Reply<Sources> {
                 platform: std::env::consts::OS.into(),
                 wayland: false,
                 displays: Vec::new(),
+                windows: Vec::new(),
                 microphones: Vec::new(),
                 warnings: Vec::new(),
             };
         }
         let mut warnings = Vec::new();
-        let displays = match pinray::enumerate_sources() {
-            Ok(sources) => sources
-                .into_iter()
-                .filter_map(|s| match s {
-                    pinray::CaptureSource::Display(d) => Some(Display {
-                        id: d.id.0,
-                        name: d.name,
-                        width: d.width,
-                        height: d.height,
-                    }),
-                    _ => None,
-                })
-                .collect(),
-            Err(e) => {
-                warnings.push(format!("Não foi possível listar telas: {e}"));
-                Vec::new()
+        let mut displays = Vec::new();
+        let mut windows = Vec::new();
+        match pinray::enumerate_sources() {
+            Ok(sources) => {
+                for source in sources {
+                    match source {
+                        pinray::CaptureSource::Display(display) => displays.push(Display {
+                            id: display.id.0,
+                            name: display.name,
+                            width: display.width,
+                            height: display.height,
+                        }),
+                        pinray::CaptureSource::Window(window)
+                            if !window.title.trim().is_empty() =>
+                        {
+                            windows.push(NamedSource {
+                                id: window.id.0,
+                                name: window.title,
+                            })
+                        }
+                        _ => {}
+                    }
+                }
             }
-        };
+            Err(error) => warnings.push(format!("Não foi possível listar fontes: {error}")),
+        }
         let microphones = match tinrec_capture::audio::list() {
             Ok(m) => m,
             Err(e) => {
@@ -305,12 +350,72 @@ async fn get_sources() -> Reply<Sources> {
             platform: std::env::consts::OS.into(),
             wayland: std::env::var_os("WAYLAND_DISPLAY").is_some(),
             displays,
+            windows,
             microphones,
             warnings,
         }
     })
     .await
     .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn get_cameras(app: tauri::AppHandle) -> Reply<Vec<tinrec_capture::camera::Device>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tinrec_capture::camera::devices(&tool_path(&app, "ffmpeg")).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+fn select_area(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    session_id: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> Reply<()> {
+    let session = lock(&state.session)?;
+    if session.id != session_id
+        || session.capture_mode != "area"
+        || session.snapshot.phase != "starting"
+    {
+        return Err("Seleção de área encerrada.".into());
+    }
+    let preview = session
+        .preview
+        .as_ref()
+        .ok_or("A imagem para seleção ainda não chegou.")?;
+    if x < 0
+        || y < 0
+        || width < 2
+        || height < 2
+        || x as u64 + width as u64 > preview.source_width as u64
+        || y as u64 + height as u64 > preview.source_height as u64
+    {
+        return Err("Selecione uma área dentro da imagem.".into());
+    }
+    *lock(&state.webcam_region)? = Some((
+        f64::from(x) / f64::from(preview.source_width),
+        f64::from(y) / f64::from(preview.source_height),
+        f64::from(width) / f64::from(preview.source_width),
+        f64::from(height) / f64::from(preview.source_height),
+    ));
+    let sender = session.controls.clone().ok_or("Captura encerrada")?;
+    drop(session);
+    position_webcam_window(&app);
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    sender
+        .send(Control::SelectArea(pinray::Rect {
+            x,
+            y,
+            width,
+            height,
+        }))
+        .map_err(|_| "Captura encerrada".to_string())
 }
 #[tauri::command]
 fn get_folder(state: State<'_, Shared>) -> Reply<String> {
@@ -361,6 +466,26 @@ async fn start_recording(
     {
         return Err("Resolução ou volume inválido.".into());
     }
+    if (request.capture_mode == "camera" || request.webcam_enabled)
+        && request.camera.trim().is_empty()
+    {
+        return Err("Escolha uma câmera para gravar.".into());
+    }
+    if request.capture_mode == "window"
+        && request.window.is_empty()
+        && !(cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some())
+        && !synthetic_enabled()
+    {
+        return Err("Escolha uma janela para gravar.".into());
+    }
+    let title = request.title.trim();
+    if title.is_empty()
+        || title.chars().count() > 90
+        || title.contains(['{', '}'])
+        || safe_title(title) != title
+    {
+        return Err("Informe um nome de vídeo válido em Configurações antes de gravar.".into());
+    }
     let mut session = lock(&state.session)?;
     if state.exiting.load(Ordering::Acquire) {
         return Err("O Tinrec está sendo encerrado.".into());
@@ -368,7 +493,18 @@ async fn start_recording(
     if session.snapshot.busy() {
         return Err("Já existe uma gravação em andamento.".into());
     }
-    let folder = lock(&state.folder)?.clone();
+    if !request.keep_local && !state.cloud.view()?.connected {
+        return Err("Conecte sua conta Google ou ative a cópia local em Configurações.".into());
+    }
+    let folder = if request.keep_local {
+        lock(&state.folder)?.clone()
+    } else {
+        state
+            .config
+            .parent()
+            .ok_or("Pasta de dados indisponível")?
+            .join("pending-recordings")
+    };
     fs::create_dir_all(&folder)
         .map_err(|e| format!("Não foi possível criar a pasta de gravações: {e}"))?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -380,6 +516,17 @@ async fn start_recording(
     );
     let cloud_title = safe_title(&request.title);
     let cloud_resolution = request.resolution;
+    let webcam = if request.capture_mode == "camera" {
+        None
+    } else if !request.camera.is_empty() {
+        Some(request.camera.clone())
+    } else {
+        tinrec_capture::camera::devices(&tool_path(&app, "ffmpeg"))
+            .ok()
+            .and_then(|cameras| cameras.first().map(|camera| camera.id.clone()))
+    };
+    let webcam_available = webcam.is_some();
+    let webcam_position = *lock(&state.webcam_position)?;
     let options = RecordOptions {
         output: folder.join(&file_name),
         fast_finalize: true,
@@ -387,7 +534,24 @@ async fn start_recording(
         system_audio: request.system_audio,
         microphone: request.microphone,
         microphone_device: request.microphone_device.filter(|s| !s.is_empty()),
-        display: request.display,
+        display: match request.capture_mode.as_str() {
+            "window" => {
+                if request.window.is_empty() {
+                    "auto".into()
+                } else {
+                    request.window
+                }
+            }
+            "camera" => request.camera,
+            _ => request.display,
+        },
+        capture_mode: request.capture_mode.clone(),
+        crop: None,
+        webcam,
+        webcam_disabled: !request.webcam_enabled,
+        webcam_visible_in_capture: cfg!(target_os = "linux") && request.capture_mode != "window",
+        webcam_x: webcam_position.0,
+        webcam_y: webcam_position.1,
         backend: "auto".into(),
         resolution: request.resolution,
         system_volume: request.system_volume,
@@ -398,26 +562,7 @@ async fn start_recording(
         pause_for: 2.0,
     };
     recording::validate_options(&options).map_err(|e| e.to_string())?;
-    let (sender, receiver) = mpsc::channel();
-    session.id = id.clone();
-    session.controls = Some(sender);
-    session.exit_requested = false;
-    session.discard_requested = false;
-    session.preview = None;
-    session.snapshot = Snapshot {
-        revision: session.snapshot.revision + 1,
-        phase: "starting".into(),
-        session_id: Some(id.clone()),
-        file_name: Some(file_name),
-        microphone_enabled: options.microphone,
-        system_enabled: options.system_audio,
-        ..Default::default()
-    };
-    let initial = session.snapshot.clone();
-    drop(session);
-    emit(&app, &initial);
-    let state = state.inner().clone();
-    let _ = state.cloud.enqueue(
+    let queued = state.cloud.enqueue(
         id.clone(),
         options.output.clone(),
         cloud_title,
@@ -425,48 +570,40 @@ async fn start_recording(
         0.0,
         true,
     );
-    let (preview_sender, preview_receiver) = mpsc::sync_channel::<recording::PreviewFrame>(1);
-    let preview_app = app.clone();
-    let preview_state = state.clone();
-    let preview_id = id.clone();
-    std::thread::spawn(move || {
-        let mut sequence = 0;
-        while let Ok(frame) = preview_receiver.recv() {
-            let mut jpeg = Vec::new();
-            if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 65)
-                .encode(
-                    &frame.rgb,
-                    frame.width,
-                    frame.height,
-                    image::ExtendedColorType::Rgb8,
-                )
-                .is_err()
-            {
-                continue;
-            }
-            sequence += 1;
-            let preview = Preview {
-                session_id: preview_id.clone(),
-                sequence,
-                image: format!(
-                    "data:image/jpeg;base64,{}",
-                    base64::engine::general_purpose::STANDARD.encode(jpeg)
-                ),
-                width: frame.width,
-                height: frame.height,
-                source_width: frame.source_width,
-                source_height: frame.source_height,
-            };
-            if let Ok(mut session) = preview_state.session.lock()
-                && session.id == preview_id
-                && matches!(session.snapshot.phase.as_str(), "recording" | "paused")
-            {
-                session.preview = Some(preview.clone());
-                drop(session);
-                let _ = preview_app.emit_to("main", "recorder-preview", preview);
-            }
-        }
-    });
+    if !request.keep_local {
+        queued?;
+        state.cloud.remove_local_after_upload(&id)?;
+    }
+    let (sender, receiver) = mpsc::channel();
+    session.id = id.clone();
+    session.capture_mode = request.capture_mode.clone();
+    session.controls = Some(sender);
+    session.exit_requested = false;
+    session.discard_requested = false;
+    session.preview = None;
+    session.webcam_preview = None;
+    session.snapshot = Snapshot {
+        revision: session.snapshot.revision + 1,
+        phase: "starting".into(),
+        session_id: Some(id.clone()),
+        file_name: Some(file_name),
+        webcam_available,
+        webcam_enabled: webcam_available && request.webcam_enabled,
+        microphone_enabled: options.microphone,
+        system_enabled: options.system_audio,
+        ..Default::default()
+    };
+    let initial = session.snapshot.clone();
+    *lock(&state.webcam_region)? = None;
+    drop(session);
+    position_webcam_window(&app);
+    emit(&app, &initial);
+    let state = state.inner().clone();
+    if options.capture_mode == "area"
+        && let Some(window) = app.get_webview_window("main")
+    {
+        let _ = window.hide();
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let tools = check_tools(&app);
         let outcome = if !tools.ready {
@@ -475,7 +612,75 @@ async fn start_recording(
             // A deterministic test source is available only in debug builds, through
             // the host environment; it is never a frontend recording option.
             let synthetic = synthetic_enabled();
-            recording::run_observed(
+            let selection_callback = |frame: recording::PreviewFrame| {
+                let mut jpeg = Vec::new();
+                if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 85)
+                    .encode(
+                        &frame.rgb,
+                        frame.width,
+                        frame.height,
+                        image::ExtendedColorType::Rgb8,
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+                let preview = Preview {
+                    session_id: id.clone(),
+                    sequence: 1,
+                    image: format!(
+                        "data:image/jpeg;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(jpeg)
+                    ),
+                    width: frame.width,
+                    height: frame.height,
+                    source_width: frame.source_width,
+                    source_height: frame.source_height,
+                };
+                if let Ok(mut session) = state.session.lock()
+                    && session.id == id
+                {
+                    session.preview = Some(preview.clone());
+                    drop(session);
+                    let _ = show_recorder(app.clone());
+                    let _ = app.emit_to("main", "area-selection", preview);
+                }
+            };
+            let webcam_callback = |frame: recording::PreviewFrame| {
+                let mut jpeg = Vec::new();
+                if image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75)
+                    .encode(
+                        &frame.rgb,
+                        frame.width,
+                        frame.height,
+                        image::ExtendedColorType::Rgb8,
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+                let preview = Preview {
+                    session_id: id.clone(),
+                    sequence: now_ms(),
+                    image: format!(
+                        "data:image/jpeg;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(jpeg)
+                    ),
+                    width: frame.width,
+                    height: frame.height,
+                    source_width: frame.source_width,
+                    source_height: frame.source_height,
+                };
+                if let Ok(mut session) = state.session.lock()
+                    && session.id == id
+                    && session.snapshot.webcam_enabled
+                {
+                    session.webcam_preview = Some(preview.clone());
+                    drop(session);
+                    let _ = app.emit_to("webcam", "webcam-preview", preview);
+                }
+            };
+            recording::run_observed_with_webcam(
                 &options,
                 synthetic,
                 receiver,
@@ -500,13 +705,15 @@ async fn start_recording(
                         emit(&app, &snapshot);
                     }
                 },
-                Some(&|frame| {
-                    let _ = preview_sender.try_send(frame);
-                }),
+                if options.capture_mode == "area" {
+                    Some(&selection_callback)
+                } else {
+                    None
+                },
+                Some(&webcam_callback),
             )
             .map_err(|e| format!("{e:#}"))
         };
-        drop(preview_sender);
         // The session mutex resolves Stop/Discard against finalization before the job can become uploadable.
         if let Ok(mut session) = state.session.lock()
             && session.id == id
@@ -542,13 +749,55 @@ async fn start_recording(
             let snapshot = session.snapshot.clone();
             let close = session.exit_requested;
             drop(session);
+            if options.capture_mode == "area" && snapshot.phase != "completed" && !close {
+                let _ = show_recorder(app.clone());
+            }
             emit(&app, &snapshot);
             if close {
                 app.exit(0);
+            } else if snapshot.phase == "completed" {
+                open_completed_video(app.clone(), state.clone(), id.clone());
             }
         }
     });
     Ok(initial)
+}
+
+// A page is normally reserved while recording. If that request is still pending,
+// wait off the capture thread and open this session's page exactly once.
+fn open_completed_video(app: tauri::AppHandle, state: Shared, id: String) {
+    tauri::async_runtime::spawn_blocking(move || {
+        loop {
+            if state.exiting.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(view) = state.cloud.view() else { return };
+            if !view.connected {
+                return;
+            }
+            let Some(job) = view.jobs.iter().find(|job| job.id == id) else {
+                return;
+            };
+            if matches!(job.status.as_str(), "failed" | "discarded") {
+                return;
+            }
+            if let Some(url) = &job.url {
+                if app.opener().open_url(url, None::<&str>).is_err()
+                    && let Ok(mut session) = state.session.lock()
+                    && session.id == id
+                    && session.snapshot.phase == "completed"
+                {
+                    session.snapshot.error = Some("Vídeo salvo, mas não foi possível abrir o navegador. Abra a biblioteca no site para assistir.".into());
+                    session.snapshot.revision += 1;
+                    let snapshot = session.snapshot.clone();
+                    drop(session);
+                    emit(&app, &snapshot);
+                }
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
 }
 
 #[tauri::command]
@@ -564,6 +813,9 @@ fn control_recording(
         ("stop", "starting" | "recording" | "paused") => Control::Stop,
         ("discard", "starting" | "recording" | "paused" | "stopping" | "finalizing") => {
             Control::Stop
+        }
+        ("toggle-webcam", "recording" | "paused") if session.snapshot.webcam_available => {
+            Control::SetWebcamEnabled(!session.snapshot.webcam_enabled)
         }
         ("mute-microphone", "recording" | "paused") if session.snapshot.microphone_enabled => {
             Control::SetMicrophoneMuted(!session.snapshot.microphone_muted)
@@ -588,6 +840,10 @@ fn control_recording(
     match control {
         Control::SetMicrophoneMuted(muted) => session.snapshot.microphone_muted = muted,
         Control::SetSystemMuted(muted) => session.snapshot.system_muted = muted,
+        Control::SetWebcamEnabled(enabled) => {
+            session.snapshot.webcam_enabled = enabled;
+            session.webcam_preview = None;
+        }
         _ => {}
     }
     session.snapshot.revision += 1;
@@ -604,6 +860,7 @@ fn discard_files(output: &Path) -> Reply<()> {
         ".capture.json",
         ".ffprobe.json",
         ".ffmpeg.log",
+        ".camera.log",
     ] {
         paths.push(tinrec_capture::encoder::sidecar(output, suffix));
     }
@@ -620,6 +877,111 @@ fn discard_files(output: &Path) -> Reply<()> {
     } else {
         Ok(())
     }
+}
+fn load_webcam_position(config: &Path) -> (f64, f64) {
+    fs::read(config.with_file_name("webcam-position.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<(f64, f64)>(&bytes).ok())
+        .filter(|(x, y)| {
+            x.is_finite() && y.is_finite() && (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y)
+        })
+        .unwrap_or((0.0, 1.0))
+}
+fn webcam_bounds(state: &AppState, monitor: &tauri::Monitor) -> (i32, i32, u32, u32) {
+    let region = state
+        .webcam_region
+        .lock()
+        .ok()
+        .and_then(|value| *value)
+        .unwrap_or((0., 0., 1., 1.));
+    (
+        monitor.position().x + (f64::from(monitor.size().width) * region.0).round() as i32,
+        monitor.position().y + (f64::from(monitor.size().height) * region.1).round() as i32,
+        (f64::from(monitor.size().width) * region.2).round().max(2.) as u32,
+        (f64::from(monitor.size().height) * region.3)
+            .round()
+            .max(2.) as u32,
+    )
+}
+fn position_webcam_window(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("webcam") else {
+        return;
+    };
+    let Some(main) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(Some(monitor)) = main.current_monitor() else {
+        return;
+    };
+    let state = app.state::<Shared>();
+    let Ok(position) = state.webcam_position.lock() else {
+        return;
+    };
+    let (x, y) = *position;
+    drop(position);
+    let (origin_x, origin_y, width, height) = webcam_bounds(&state, &monitor);
+    let diameter = (height / 5).min(width / 2).max(1);
+    let margin = (height / 40).min(width.saturating_sub(diameter));
+    let _ = window.set_size(tauri::PhysicalSize::new(diameter, diameter));
+    let _ = window.set_position(tauri::PhysicalPosition::new(
+        origin_x
+            + margin as i32
+            + (f64::from(width.saturating_sub(diameter + 2 * margin)) * x).round() as i32,
+        origin_y
+            + margin as i32
+            + (f64::from(height.saturating_sub(diameter + 2 * margin)) * y).round() as i32,
+    ));
+}
+fn save_webcam_position(app: &tauri::AppHandle) {
+    let Some(window) = app.get_webview_window("webcam") else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(origin) = window.outer_position() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let state = app.state::<Shared>();
+    if !snapshot_value(&state).is_ok_and(|snapshot| snapshot.busy()) {
+        return;
+    }
+    let (origin_x, origin_y, width, height) = webcam_bounds(&state, &monitor);
+    let margin = height / 40;
+    let x = (f64::from(origin.x - origin_x - margin as i32)
+        / f64::from(width.saturating_sub(size.width + 2 * margin).max(1)))
+    .clamp(0., 1.);
+    let y = (f64::from(origin.y - origin_y - margin as i32)
+        / f64::from(height.saturating_sub(size.height + 2 * margin).max(1)))
+    .clamp(0., 1.);
+    if let Ok(mut position) = state.webcam_position.lock() {
+        *position = (x, y);
+    }
+    if let Ok(bytes) = serde_json::to_vec(&(x, y)) {
+        let _ = fs::write(state.config.with_file_name("webcam-position.json"), bytes);
+    }
+    if let Ok(session) = state.session.lock()
+        && let Some(sender) = &session.controls
+    {
+        let _ = sender.send(Control::SetWebcamPosition(x, y));
+    }
+}
+#[tauri::command]
+fn get_webcam_preview(state: State<'_, Shared>) -> Reply<Option<Preview>> {
+    let session = lock(&state.session)?;
+    Ok(
+        if session.snapshot.webcam_enabled && session.snapshot.busy() {
+            session.webcam_preview.clone()
+        } else {
+            None
+        },
+    )
 }
 #[tauri::command]
 fn get_preview(state: State<'_, Shared>) -> Reply<Option<Preview>> {
@@ -666,6 +1028,57 @@ fn open_recording(app: tauri::AppHandle, state: State<'_, Shared>, file_name: St
     app.opener()
         .open_path(path.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn recording_thumbnail(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    file_name: String,
+) -> Reply<String> {
+    let path = recording_path(&state, &file_name)?;
+    let ffmpeg = tool_path(&app, "ffmpeg");
+    tauri::async_runtime::spawn_blocking(move || extract_thumbnail(&ffmpeg, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+fn extract_thumbnail(ffmpeg: &Path, path: &Path) -> Reply<String> {
+    let output = native_command(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-threads",
+            "1",
+            "-i",
+        ])
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=480:270:force_original_aspect_ratio=decrease",
+            "-threads",
+            "1",
+            "-f",
+            "image2pipe",
+            "-c:v",
+            "mjpeg",
+            "-q:v",
+            "5",
+            "pipe:1",
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err("Miniatura indisponível para este vídeo.".into());
+    }
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(output.stdout)
+    ))
 }
 #[tauri::command]
 fn open_folder(app: tauri::AppHandle, state: State<'_, Shared>) -> Reply<()> {
@@ -783,6 +1196,18 @@ fn cloud_enqueue(state: State<'_, Shared>, file_name: String) -> Reply<()> {
     )
 }
 #[tauri::command]
+fn cloud_open_recording(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    file_name: String,
+) -> Reply<()> {
+    let path = recording_path(&state, &file_name)?;
+    let url = state.cloud.recording_url(&path)?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
 fn cloud_open(app: tauri::AppHandle, state: State<'_, Shared>, id: Option<String>) -> Reply<()> {
     let url = match id {
         None => "https://tinrec.vercel.app".to_owned(),
@@ -862,6 +1287,31 @@ fn quit_app(app: tauri::AppHandle) -> Reply<()> {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        let use_xwayland = std::env::var_os("GDK_BACKEND").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_some()
+            && std::env::var_os("DISPLAY").is_some();
+        let compatible_renderer = std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none();
+        if (use_xwayland || compatible_renderer)
+            && let Ok(executable) = std::env::current_exe()
+        {
+            use std::os::unix::process::CommandExt;
+            // Configure WebKit before GTK or worker threads start. DMA-BUF can
+            // fail to allocate GBM buffers on otherwise working Linux desktops.
+            // This changes only the webview renderer, not PipeWire/FFmpeg.
+            let mut command = Command::new(executable);
+            command.args(std::env::args_os().skip(1));
+            if use_xwayland {
+                command.env("GDK_BACKEND", "x11");
+            }
+            if compatible_renderer {
+                command.env("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
+            let error = command.exec();
+            eprintln!("Não foi possível configurar a renderização do Tinrec: {error}");
+        }
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             let _ = show_recorder(app.clone());
@@ -881,7 +1331,7 @@ fn main() {
                 let size = monitor.size();
                 let origin = monitor.position();
                 let scale = monitor.scale_factor();
-                let width = (490.0 * scale) as i32;
+                let width = (536.0 * scale) as i32;
                 let height = (56.0 * scale) as i32;
                 let _ = controls.set_position(tauri::PhysicalPosition::new(
                     origin.x + (size.width as i32 - width).max(0) / 2,
@@ -910,6 +1360,8 @@ fn main() {
                 cloud,
                 exiting: AtomicBool::new(false),
                 folder: Mutex::new(saved.unwrap_or(default)),
+                webcam_position: Mutex::new(load_webcam_position(&config)),
+                webcam_region: Mutex::new(None),
                 config,
                 session: Mutex::new(Session {
                     snapshot: Snapshot {
@@ -921,12 +1373,33 @@ fn main() {
                     exit_requested: false,
                     discard_requested: false,
                     preview: None,
+                    capture_mode: "screen".into(),
+                    webcam_preview: None,
                 }),
             }));
+            app.manage(shortcuts::Shortcuts::new(data.join("shortcuts.json")));
+            if std::env::var_os("WAYLAND_DISPLAY").is_none() || !cfg!(target_os = "linux") {
+                app.handle()
+                    .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+            }
+            let shortcut_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let manager = shortcut_app.state::<shortcuts::Shortcuts>();
+                if let Ok(view) = manager.view()
+                    && !view.bindings.is_empty()
+                {
+                    let _ = manager.apply(&shortcut_app, view.bindings).await;
+                }
+            });
+            position_webcam_window(app.handle());
             tray::setup(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            shortcuts::local_shortcut,
+            shortcuts::get_shortcuts,
+            shortcuts::save_shortcuts,
+            shortcuts::shortcut_capture,
             quit_app,
             hide_to_tray,
             get_snapshot,
@@ -935,12 +1408,16 @@ fn main() {
             show_controls,
             get_tools,
             get_sources,
+            get_cameras,
+            select_area,
+            get_webcam_preview,
             get_folder,
             choose_folder,
             start_recording,
             control_recording,
             list_recordings,
             open_recording,
+            recording_thumbnail,
             open_folder,
             cloud_state,
             cloud_connect,
@@ -948,9 +1425,13 @@ fn main() {
             cloud_enqueue,
             cloud_retry,
             cloud_open,
+            cloud_open_recording,
             cloud_copy
         ])
         .on_window_event(|window, event| {
+            if window.label() == "webcam" && matches!(event, tauri::WindowEvent::Moved(_)) {
+                save_webcam_position(window.app_handle());
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -978,9 +1459,54 @@ fn main() {
 mod tests {
     use super::*;
     #[test]
+    fn webcam_position_survives_restart_and_rejects_invalid_values() {
+        let dir = std::env::temp_dir().join(format!("tinrec-position-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("desktop.json");
+        assert_eq!(load_webcam_position(&config), (0., 1.));
+        fs::write(dir.join("webcam-position.json"), "[0.75,0.2]").unwrap();
+        assert_eq!(load_webcam_position(&config), (0.75, 0.2));
+        fs::write(dir.join("webcam-position.json"), "[2,-1]").unwrap();
+        assert_eq!(load_webcam_position(&config), (0., 1.));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn recording_names_cannot_contain_paths_or_be_empty() {
         assert_eq!(safe_title("../../minha: gravação?"), "minha gravação");
         assert_eq!(safe_title(".. / "), "Gravação");
         assert_eq!(safe_title("Uma conversa"), "Uma conversa");
+    }
+    #[test]
+    fn extracts_a_real_frame_and_rejects_invalid_media() {
+        let file =
+            std::env::temp_dir().join(format!("tinrec-thumbnail-{}.mp4", uuid::Uuid::new_v4()));
+        let status = native_command(Path::new("ffmpeg"))
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=640x360:d=0.1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&file)
+            .status()
+            .expect("FFmpeg is required for the thumbnail test");
+        assert!(status.success());
+        let result = extract_thumbnail(Path::new("ffmpeg"), &file);
+        fs::remove_file(&file).unwrap();
+        let value = result.unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(value.strip_prefix("data:image/jpeg;base64,").unwrap())
+            .unwrap();
+        let image = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((image.width(), image.height()), (480, 270));
+        assert!(extract_thumbnail(Path::new("ffmpeg"), &file).is_err());
     }
 }

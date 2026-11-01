@@ -11,3 +11,12 @@ input:not([type=checkbox]):not([type=range]):not([type=button]):not([type=submit
 .floating-drag-handle{display:inline-flex;align-items:center;justify-content:center;width:24px;height:36px;cursor:grab;flex-shrink:0}.floating-drag-handle *{pointer-events:none}
 
 .background-note{font-size:10px;color:#8a93aa;text-align:center;margin:18px 0 0}.footer .text-button{font-size:10px;white-space:nowrap}
+
+/* Keep a true square even if the compositor rounds the window size at fractional DPI. */
+.webcam-window,.webcam-window body,.webcam-window #root{width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:transparent!important}
+.webcam-window #root{display:grid;place-items:center}
+.webcam-overlay{position:relative;isolation:isolate;width:min(calc(100vw - 4px),calc(100vh - 4px));height:auto;aspect-ratio:1/1;flex:none;border-radius:50%;clip-path:circle(50% at 50% 50%);overflow:hidden;background:#1d2636;color:#b6c1d7;display:flex;align-items:center;justify-content:center;cursor:grab;user-select:none}
+.webcam-overlay::after{content:"";position:absolute;inset:0;border:2px solid #fff;border-radius:50%;box-sizing:border-box;pointer-events:none;z-index:1}
+.webcam-overlay:active{cursor:grabbing}
+.webcam-overlay img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;pointer-events:none}
+.webcam-overlay svg{pointer-events:none}

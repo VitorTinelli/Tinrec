@@ -19,6 +19,8 @@ export interface Snapshot {
   systemEnabled?: boolean;
   microphoneMuted?: boolean;
   systemMuted?: boolean;
+  webcamAvailable?: boolean;
+  webcamEnabled?: boolean;
   phase: Phase;
   elapsedSeconds: number;
   videoFrames: number;
@@ -26,11 +28,14 @@ export interface Snapshot {
   fileName: string | null;
   error: string | null;
 }
+export type CaptureMode = "screen" | "window" | "area" | "camera";
 export interface Sources {
   synthetic?: boolean;
   platform: string;
   wayland: boolean;
   displays: { id: string; name: string; width: number; height: number }[];
+  windows?: { id: string; name: string }[];
+  cameras?: { id: string; name: string }[];
   microphones: string[];
   warnings: string[];
 }
@@ -41,6 +46,11 @@ export interface Tools {
   message: string | null;
 }
 export interface Settings {
+  captureMode: CaptureMode;
+  window: string;
+  camera: string;
+  webcamEnabled: boolean;
+  keepLocal: boolean;
   title: string;
   display: string;
   microphoneDevice: string | null;

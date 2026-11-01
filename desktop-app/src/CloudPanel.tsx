@@ -1,3 +1,4 @@
+import googleDriveLogo from "./assets/google-drive.png";
 import { useEffect, useState } from "react";
 import { call, message, type RecordingFile } from "./bridge";
 interface Upload {
@@ -29,7 +30,13 @@ const labels: Record<string, string> = {
   error: "Envio pendente",
   failed: "Gravação interrompida",
 };
-export function CloudPanel({ files }: { files: RecordingFile[] }) {
+export function CloudPanel({
+  files,
+  connectionOnly = false,
+}: {
+  files: RecordingFile[];
+  connectionOnly?: boolean;
+}) {
   const [cloud, setCloud] = useState<Cloud | null>(null),
     [error, setError] = useState<string | null>(null),
     [pending, setPending] = useState(false),
@@ -90,7 +97,15 @@ export function CloudPanel({ files }: { files: RecordingFile[] }) {
     <section className="panel cloud-panel" aria-labelledby="cloud-heading">
       <div className="panel-heading">
         <div>
-          <h2 id="cloud-heading">Seu Drive, seu link</h2>
+          <h2 id="cloud-heading" className="drive-heading">
+            <img
+              src={googleDriveLogo}
+              width={24}
+              height={24}
+              alt="Google Drive"
+            />
+            Seu Drive, seu link
+          </h2>
           <p>
             {cloud?.connected
               ? `Conectado como ${cloud.email}`
@@ -139,14 +154,7 @@ export function CloudPanel({ files }: { files: RecordingFile[] }) {
           {error ?? cloud?.error}
         </p>
       ) : null}
-      <p className="cloud-description">
-        {cloud?.connected
-          ? "Novas gravações terão uma cópia temporária para reprodução enquanto o Google prepara o player do Drive. O link fica disponível durante a gravação e o vídeo abre após o primeiro envio."
-          : "Seus vídeos continuam salvos no computador. Ao conectar, novas gravações serão enviadas ao seu Drive e poderão ser vistas por qualquer pessoa com o link."}{" "}
-        Mantenha o aplicativo aberto durante o envio. Envios pendentes são
-        retomados ao reabrir.
-      </p>
-      {cloud?.connected ? (
+      {!connectionOnly && cloud?.connected ? (
         <button
           className="text-button"
           onClick={() => void act("cloud_open", { id: null })}
@@ -155,7 +163,7 @@ export function CloudPanel({ files }: { files: RecordingFile[] }) {
           Abrir minha biblioteca no site ↗
         </button>
       ) : null}
-      {cloud?.jobs.length ? (
+      {!connectionOnly && cloud?.jobs.length ? (
         <div className="cloud-list">
           {cloud.jobs.slice(0, 20).map((job) => (
             <article className="cloud-job" key={job.id}>
@@ -228,7 +236,7 @@ export function CloudPanel({ files }: { files: RecordingFile[] }) {
           ))}
         </div>
       ) : null}
-      {cloud?.connected && available.length ? (
+      {!connectionOnly && cloud?.connected && available.length ? (
         <div className="cloud-existing">
           <h3>Enviar uma gravação anterior</h3>
           {available.slice(0, 10).map((file) => (

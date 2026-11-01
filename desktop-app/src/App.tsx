@@ -1,4 +1,19 @@
+import { DeviceCard } from "./DeviceCard";
+import { AreaSelector } from "./AreaSelector";
+import { ShortcutsPanel } from "./ShortcutsPanel";
+import { listen } from "@tauri-apps/api/event";
 import {
+  defaultRecordingName,
+  captureType,
+  resolveRecordingName,
+  recordingSource,
+  recordingNameError,
+  nameVariables,
+} from "./recordingName";
+import { useEffect, useRef, useState } from "react";
+import { RecordingLibrary } from "./RecordingLibrary";
+import {
+  Library,
   Circle,
   Monitor,
   Mic,
@@ -8,17 +23,14 @@ import {
   Play,
   Pause,
   Square,
-  Check,
   AlertCircle,
-  RefreshCw,
-  Video,
   ShieldCheck,
-  LoaderCircle,
-  ArrowUpRight,
   Settings2,
+  AppWindow,
+  Scan,
+  Video,
 } from "lucide-react";
-import { duration, size, type Phase } from "./bridge";
-import { CapturePreview } from "./CapturePreview";
+import { duration, type Phase, type CaptureMode } from "./bridge";
 import { AudioMuteButtons, DiscardControl } from "./RecordingControls";
 import { call } from "./bridge";
 import { CloudPanel } from "./CloudPanel";
@@ -95,6 +107,14 @@ function AudioControl({
 
 export default function App() {
   const recorder = useRecorder();
+  const mainRef = useRef<HTMLElement>(null);
+  const [variablesOpen, setVariablesOpen] = useState(false);
+  const [view, setView] = useState<"recorder" | "library" | "settings">(
+    "recorder",
+  );
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0;
+  }, [view]);
   const {
     settings,
     update,
@@ -108,6 +128,50 @@ export default function App() {
     loading,
     active,
   } = recorder;
+  const shortcutRecorder = useRef(recorder);
+  shortcutRecorder.current = recorder;
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<string>("shortcut-action", (event) => {
+      if (disposed) return;
+      setView(
+        event.payload === "library"
+          ? "library"
+          : event.payload === "settings"
+            ? "settings"
+            : "recorder",
+      );
+      const mode = ["screen", "window", "area"].includes(event.payload)
+        ? (event.payload as CaptureMode)
+        : undefined;
+      if (mode && shortcutRecorder.current.active) return;
+      if (mode) shortcutRecorder.current.update("captureMode", mode);
+      if (
+        (event.payload === "start" || mode) &&
+        !shortcutRecorder.current.active &&
+        !shortcutRecorder.current.pending &&
+        !shortcutRecorder.current.loading
+      ) {
+        if (
+          mode === "window" &&
+          !shortcutRecorder.current.sources?.wayland &&
+          !shortcutRecorder.current.settings.window
+        )
+          return;
+        void shortcutRecorder.current.start(mode);
+      }
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   const phase = snapshot.phase;
   const locked = active || pending !== null;
   const transitioning = [
@@ -116,17 +180,54 @@ export default function App() {
     "finalizing",
     "discarding",
   ].includes(phase);
+  const namePreview = resolveRecordingName(
+    settings.title,
+    new Date(),
+    recordingSource(settings, sources),
+    "a1b2c3",
+    captureType(settings.captureMode),
+  );
+  const nameError = recordingNameError(settings.title, namePreview);
   const issue = error ?? snapshot.error;
-  const currentFile = files.find((file) => file.fileName === snapshot.fileName);
-  const summary =
-    [
-      settings.microphone ? "Microfone" : null,
-      settings.systemAudio ? "Som do computador" : null,
-    ]
-      .filter(Boolean)
-      .join(" + ") || "Sem áudio";
+  const startingMode = useRef(false);
+  async function startMode(
+    mode: CaptureMode,
+    overrides: Partial<typeof settings> = {},
+  ) {
+    if (locked || loading || !tools?.ready || startingMode.current) return;
+    update("captureMode", mode);
+    if (overrides.camera !== undefined) update("camera", overrides.camera);
+    if (overrides.window !== undefined) update("window", overrides.window);
+    if (nameError) {
+      setView("settings");
+      return;
+    }
+    const next = { ...settings, ...overrides, captureMode: mode };
+    if (
+      mode === "camera" &&
+      (!next.camera ||
+        !(sources?.cameras ?? []).some((camera) => camera.id === next.camera))
+    )
+      return;
+    if (
+      mode === "window" &&
+      !sources?.wayland &&
+      (!next.window ||
+        !(sources?.windows ?? []).some((window) => window.id === next.window))
+    )
+      return;
+    startingMode.current = true;
+    try {
+      await recorder.start(mode, overrides);
+    } finally {
+      startingMode.current = false;
+    }
+  }
   return (
-    <div className="app-shell">
+    <div
+      className={`app-shell view-${view}`}
+      data-synthetic={sources?.synthetic ? "true" : "false"}
+    >
       <header className="topbar">
         <div className="brand">
           <span className="brand-symbol">
@@ -136,19 +237,67 @@ export default function App() {
             Tinrec<span className="brand-dot">.</span>
           </span>
         </div>
-        <span className="local-badge">
-          <ShieldCheck size={14} />{" "}
-          {sources?.synthetic
-            ? "Teste com imagem e áudio gerados"
-            : "Salvo no seu computador"}
-        </span>
       </header>
-      <main>
+      <nav className="workspace-nav" aria-label="Espaço de trabalho">
+        <span className="workspace-caption">ESPAÇO PESSOAL</span>
+        <button
+          className={view === "recorder" ? "selected" : ""}
+          aria-current={view === "recorder" ? "page" : undefined}
+          onClick={() => setView("recorder")}
+        >
+          <Circle size={17} />
+          Gravador{active ? <i className="nav-recording-dot" /> : null}
+        </button>
+        <button
+          className={view === "library" ? "selected" : ""}
+          aria-current={view === "library" ? "page" : undefined}
+          onClick={() => setView("library")}
+        >
+          <Library size={17} />
+          Meus vídeos<span>{files.length}</span>
+        </button>
+        <button
+          className={view === "settings" ? "selected" : ""}
+          aria-current={view === "settings" ? "page" : undefined}
+          onClick={() => setView("settings")}
+        >
+          <Settings2 size={17} />
+          Configurações
+        </button>
+        <div className="workspace-bottom">
+          <ShieldCheck size={17} />
+          <strong>Seu espaço, suas ideias.</strong>
+          <p>
+            Grave no computador.
+            <br />
+            Compartilhe quando quiser.
+          </p>
+        </div>
+      </nav>
+      <AreaSelector
+        key={snapshot.sessionId ?? "idle"}
+        snapshot={snapshot}
+        enabled={settings.captureMode === "area"}
+        onCancel={() => void recorder.control("discard")}
+      />
+      <main ref={mainRef}>
         <div className="page-heading">
           <div>
             <div className="eyebrow">SEU ESPAÇO DE GRAVAÇÃO</div>
-            <h1>Uma ideia. Um novo vídeo.</h1>
-            <p>Capture sua tela e sua voz, sem complicação.</p>
+            <h1>
+              {view === "recorder"
+                ? "Vamos criar algo?"
+                : view === "library"
+                  ? "Meus vídeos"
+                  : "Configurações"}
+            </h1>
+            <p>
+              {view === "recorder"
+                ? "Uma tela, uma ideia. Aperte gravar."
+                : view === "library"
+                  ? "Suas ideias ganham um lugar aqui."
+                  : "Personalize sua gravação e conecte sua conta."}
+            </p>
           </div>
           <button
             className="button secondary folder-top"
@@ -189,7 +338,7 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        <div className="recorder-layout">
+        <div className="recorder-layout" hidden={view !== "recorder"}>
           <section
             className="panel configuration"
             aria-labelledby="capture-heading"
@@ -198,74 +347,224 @@ export default function App() {
               <h2 id="capture-heading">Sua gravação</h2>
               <span className="step-label">01 — CONFIGURAR</span>
             </div>
-            <label className="field-label" htmlFor="title">
-              Nome do vídeo <span>opcional</span>
-            </label>
-            <input
-              id="title"
-              className="text-input"
-              placeholder="Ex.: Apresentação do projeto"
-              maxLength={90}
-              value={settings.title}
-              disabled={locked}
-              onChange={(e) => update("title", e.target.value)}
-            />
-            <CapturePreview snapshot={snapshot} />
-            <p className="preview-source-note">
-              {sources?.wayland
-                ? "Escolha a tela no diálogo do sistema ao iniciar."
-                : "A prévia mostra o monitor selecionado abaixo."}
-            </p>
-            <div className="field-grid">
-              <div>
+            {nameError && !active ? (
+              <p className="name-error" role="alert">
+                {nameError}{" "}
+                <button
+                  className="text-button"
+                  onClick={() => setView("settings")}
+                >
+                  Configurar nome
+                </button>
+              </p>
+            ) : null}
+            {phase !== "idle" ? (
+              <div className="compact-recording">
+                <p
+                  className="recording-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {labels[phase]}
+                </p>
+                {active ? (
+                  <>
+                    <span
+                      className="timer"
+                      aria-label={`Tempo de gravação: ${duration(snapshot.elapsedSeconds)}`}
+                    >
+                      {duration(snapshot.elapsedSeconds)}
+                    </span>
+                    <div className="record-actions">
+                      {!transitioning ? (
+                        <button
+                          className="button secondary"
+                          disabled={!!pending}
+                          onClick={() =>
+                            void recorder.control(
+                              phase === "paused" ? "resume" : "pause",
+                            )
+                          }
+                        >
+                          {phase === "paused" ? (
+                            <Play size={14} />
+                          ) : (
+                            <Pause size={14} />
+                          )}{" "}
+                          {phase === "paused" ? "Retomar" : "Pausar"}
+                        </button>
+                      ) : null}
+                      <button
+                        className="button stop-button"
+                        disabled={
+                          !!pending ||
+                          ["stopping", "finalizing", "discarding"].includes(
+                            phase,
+                          )
+                        }
+                        onClick={() => void recorder.control("stop")}
+                      >
+                        <Square size={12} fill="currentColor" />
+                        {phase === "starting" ? "Cancelar" : "Encerrar"}
+                      </button>
+                    </div>
+                    <div className="main-live-controls">
+                      <AudioMuteButtons
+                        snapshot={snapshot}
+                        disabled={!!pending || transitioning}
+                        onControl={(action) => void recorder.control(action)}
+                      />
+                      <DiscardControl
+                        key={snapshot.sessionId ?? "idle"}
+                        disabled={!!pending || phase === "discarding"}
+                        onDiscard={() => void recorder.control("discard")}
+                      />
+                      <button
+                        className="text-button"
+                        onClick={() =>
+                          void call("show_controls").catch(() => {})
+                        }
+                      >
+                        Mini menu ↗
+                      </button>
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="capture-modes" aria-label="O que capturar">
+              {(
+                [
+                  ["screen", "Tela", Monitor],
+                  ["window", "Janela", AppWindow],
+                  ["area", "Área", Scan],
+                  ["camera", "Somente câmera", Video],
+                ] as const
+              ).map(([mode, label, Icon]) => (
+                <button
+                  type="button"
+                  key={mode}
+                  className={settings.captureMode === mode ? "selected" : ""}
+                  aria-pressed={settings.captureMode === mode}
+                  disabled={locked || loading || !tools?.ready || !!nameError}
+                  data-capture-mode={mode}
+                  onClick={() => void startMode(mode)}
+                >
+                  <Icon size={20} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+            {settings.captureMode === "camera" ? (
+              <div className="source-choice">
+                <label className="field-label" htmlFor="camera">
+                  Câmera
+                </label>
+                <select
+                  id="camera"
+                  value={settings.camera}
+                  disabled={locked || recorder.cameraLoading}
+                  onChange={(event) => {
+                    if (event.target.value)
+                      void startMode("camera", { camera: event.target.value });
+                    else update("camera", "");
+                  }}
+                >
+                  <option value="">
+                    {recorder.cameraLoading
+                      ? "Buscando câmeras…"
+                      : "Escolha uma câmera"}
+                  </option>
+                  {sources?.cameras?.map((camera) => (
+                    <option key={camera.id} value={camera.id}>
+                      {camera.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : sources?.wayland ? (
+              <p className="source-mode-hint">
+                {settings.captureMode === "window"
+                  ? "Escolha uma janela no diálogo do sistema ao iniciar."
+                  : settings.captureMode === "area"
+                    ? "Escolha a tela ao iniciar. Depois, arraste para marcar a área."
+                    : "Escolha a tela no diálogo do sistema ao iniciar."}
+              </p>
+            ) : settings.captureMode === "window" ? (
+              <div className="source-choice">
+                <label className="field-label" htmlFor="window">
+                  Janela
+                </label>
+                <select
+                  id="window"
+                  value={settings.window}
+                  disabled={locked}
+                  onChange={(event) => {
+                    if (event.target.value)
+                      void startMode("window", { window: event.target.value });
+                    else update("window", "");
+                  }}
+                >
+                  <option value="">Escolha uma janela</option>
+                  {sources?.windows?.map((window) => (
+                    <option key={window.id} value={window.id}>
+                      {window.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="text-button"
+                  disabled={locked || loading}
+                  onClick={() => void recorder.refresh()}
+                >
+                  Atualizar janelas
+                </button>
+              </div>
+            ) : (
+              <div className="source-choice">
                 <label className="field-label" htmlFor="display">
                   Tela
                 </label>
                 <select
                   id="display"
-                  value={sources?.wayland ? "auto" : settings.display}
-                  disabled={locked || !!sources?.wayland}
-                  onChange={(e) => update("display", e.target.value)}
+                  value={settings.display}
+                  disabled={locked}
+                  onChange={(event) => update("display", event.target.value)}
                 >
-                  <option value="auto">
-                    {sources?.wayland
-                      ? "Escolher ao iniciar"
-                      : "Monitor principal"}
-                  </option>
+                  <option value="auto">Tela principal</option>
                   {sources?.displays.map((display) => (
                     <option key={display.id} value={display.id}>
                       {display.name} · {display.width} × {display.height}
                     </option>
                   ))}
                 </select>
+                {settings.captureMode === "area" ? (
+                  <p className="source-mode-hint">
+                    Ao iniciar, arraste para marcar a área na tela escolhida.
+                  </p>
+                ) : null}
               </div>
-              <div>
-                <label className="field-label" htmlFor="resolution">
-                  Qualidade
-                </label>
-                <select
-                  id="resolution"
-                  value={settings.resolution}
-                  disabled={locked}
-                  onChange={(e) => update("resolution", Number(e.target.value))}
-                >
-                  <option value={1080}>1080p · Full HD</option>
-                  <option value={720}>720p · Arquivo menor</option>
-                </select>
-              </div>
-            </div>
+            )}
             <div className="section-divider">
-              <h3>Áudio</h3>
+              <h3>Dispositivos</h3>
               <span>Sua voz, nos dois lados</span>
             </div>
-            <div className="audio-grid">
-              <AudioControl
+            <div
+              className={`audio-grid ${settings.captureMode !== "camera" ? "has-webcam" : ""}`}
+            >
+              <DeviceCard
                 kind="microphone"
                 enabled={settings.microphone}
                 volume={settings.microphoneVolume}
                 disabled={locked}
+                value={settings.microphoneDevice ?? ""}
+                devices={(sources?.microphones ?? []).map((name) => ({
+                  id: name,
+                  name,
+                }))}
                 onToggle={(value) => update("microphone", value)}
                 onVolume={(value) => update("microphoneVolume", value)}
+                onSelect={(value) => update("microphoneDevice", value || null)}
               />
               <AudioControl
                 kind="system"
@@ -275,254 +574,157 @@ export default function App() {
                 onToggle={(value) => update("systemAudio", value)}
                 onVolume={(value) => update("systemVolume", value)}
               />
+              {settings.captureMode !== "camera" && (
+                <DeviceCard
+                  kind="webcam"
+                  enabled={settings.webcamEnabled}
+                  disabled={locked}
+                  value={settings.camera}
+                  devices={sources?.cameras ?? []}
+                  loading={recorder.cameraLoading}
+                  onToggle={(value) => update("webcamEnabled", value)}
+                  onSelect={(value) => update("camera", value)}
+                  onOpen={() => void recorder.refreshCameras()}
+                />
+              )}
             </div>
-            <label
-              className="field-label microphone-label"
-              htmlFor="microphone-device"
-            >
-              Entrada do microfone
-            </label>
-            <select
-              id="microphone-device"
-              value={settings.microphoneDevice ?? ""}
-              disabled={locked || !settings.microphone}
-              onChange={(e) =>
-                update("microphoneDevice", e.target.value || null)
-              }
-            >
-              <option value="">Padrão do sistema</option>
-              {sources?.microphones.map((name, index) => (
-                <option key={`${name}-${index}`} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
             {sources?.warnings.map((warning) => (
               <p className="device-warning" key={warning}>
                 {warning}
               </p>
             ))}
           </section>
-          <aside
-            className={`panel recording-panel phase-${phase}`}
-            aria-labelledby="recording-heading"
+        </div>
+        <div className="settings-layout" hidden={view !== "settings"}>
+          <section
+            className="panel settings-panel"
+            aria-labelledby="settings-heading"
           >
             <div className="panel-heading">
-              <h2 id="recording-heading">Vamos gravar?</h2>
-              <span className={`status-dot ${active ? "active" : ""}`} />
+              <h2 id="settings-heading">Gravação</h2>
             </div>
-            <div
-              className={`record-mark ${phase === "recording" ? "pulsing" : ""}`}
-              aria-hidden="true"
-            >
-              {phase === "completed" ? (
-                <Check size={30} />
-              ) : transitioning ? (
-                <LoaderCircle size={30} className="spin" />
-              ) : phase === "failed" ? (
-                <AlertCircle size={30} />
-              ) : (
-                <Circle size={29} fill="currentColor" strokeWidth={0} />
-              )}
+            <div className="name-field-heading">
+              <label className="field-label" htmlFor="title">
+                Nome do vídeo
+              </label>
+              <button
+                type="button"
+                className="text-button name-variables-toggle"
+                aria-expanded={variablesOpen}
+                aria-controls="name-variables-panel"
+                onClick={() => setVariablesOpen((open) => !open)}
+              >
+                Variáveis
+              </button>
             </div>
-            <p className="recording-status" role="status" aria-live="polite">
-              {labels[phase]}
-            </p>
-            <div
-              className="timer"
-              aria-label={`Tempo de gravação: ${duration(snapshot.elapsedSeconds)}`}
-            >
-              {duration(snapshot.elapsedSeconds)}
-            </div>
-            <p className="record-hint">
-              {phase === "starting"
-                ? "Autorize a captura no diálogo do sistema. Para cancelar, feche esse diálogo."
-                : phase === "paused"
-                  ? "Uma pausa para respirar. Seu vídeo espera."
-                  : ["stopping", "finalizing", "discarding"].includes(phase)
-                    ? "Finalizando e conferindo seu arquivo. Aguarde antes de fechar."
-                    : phase === "recording"
-                      ? "Tudo pronto. A sua tela está sendo gravada."
-                      : phase === "discarded"
-                        ? "O vídeo foi excluído e não será enviado."
-                        : phase === "completed"
-                          ? "Tudo salvo. Seu vídeo está pronto para abrir."
-                          : "Até 2 horas por vídeo. Você controla o começo, a pausa e o fim."}
-            </p>
-            <div className="record-actions">
-              {!active ? (
-                <button
-                  className="button primary start-button"
-                  onClick={() => void recorder.start()}
-                  disabled={!!pending || loading || !tools?.ready}
-                >
-                  <Circle size={15} fill="currentColor" strokeWidth={0} />
-                  {pending === "start"
-                    ? "Preparando…"
-                    : phase === "completed"
-                      ? "Nova gravação"
-                      : "Iniciar gravação"}
-                </button>
-              ) : (
-                <>
-                  {!transitioning ? (
-                    <button
-                      className="button secondary"
-                      onClick={() =>
-                        void recorder.control(
-                          phase === "paused" ? "resume" : "pause",
-                        )
-                      }
-                      disabled={!!pending}
-                    >
-                      {phase === "paused" ? (
-                        <Play size={16} />
-                      ) : (
-                        <Pause size={16} />
-                      )}
-                      {phase === "paused" ? "Retomar" : "Pausar"}
-                    </button>
-                  ) : null}
+            <input
+              id="title"
+              className="text-input"
+              placeholder={defaultRecordingName}
+              maxLength={180}
+              required
+              aria-invalid={!!nameError}
+              aria-describedby={nameError ? "name-error" : undefined}
+              value={settings.title}
+              disabled={locked}
+              onChange={(e) => update("title", e.target.value)}
+            />
+            {nameError ? (
+              <p className="name-error" id="name-error" role="alert">
+                {nameError}
+              </p>
+            ) : null}
+            <div id="name-variables-panel" hidden={!variablesOpen}>
+              <div
+                className="name-variables"
+                aria-label="Variáveis para o nome"
+              >
+                {nameVariables.map(([variable, description]) => (
                   <button
-                    className="button stop-button"
-                    onClick={() => void recorder.control("stop")}
-                    disabled={
-                      !!pending ||
-                      ["stopping", "finalizing", "discarding"].includes(phase)
+                    key={variable}
+                    type="button"
+                    title={description}
+                    disabled={locked}
+                    onClick={() =>
+                      update("title", settings.title + `{${variable}}`)
                     }
                   >
-                    <Square size={14} fill="currentColor" />
-                    {phase === "starting" ? "Cancelar" : "Encerrar"}
+                    <code>{`{${variable}}`}</code>
+                    <span>{description}</span>
                   </button>
-                </>
-              )}
-            </div>
-            {active ? (
-              <div className="main-live-controls">
-                <AudioMuteButtons
-                  snapshot={snapshot}
-                  disabled={!!pending || transitioning}
-                  onControl={(action) => void recorder.control(action)}
-                />
-                <DiscardControl
-                  key={snapshot.sessionId ?? "idle"}
-                  disabled={!!pending || phase === "discarding"}
-                  onDiscard={() => void recorder.control("discard")}
-                />
-                <button
-                  className="text-button"
-                  onClick={() => void call("show_controls").catch(() => {})}
-                >
-                  Mini menu ↗
-                </button>
+                ))}
               </div>
-            ) : null}
-            {phase === "completed" && currentFile ? (
-              <button
-                className="text-button open-current"
-                onClick={() => void recorder.openFile(currentFile.fileName)}
-                disabled={!!pending}
-              >
-                Abrir vídeo <ArrowUpRight size={15} />
-              </button>
-            ) : null}
-            <div className="record-summary">
-              <span>
-                <Monitor size={14} />
-                {settings.resolution}p · MP4
-              </span>
-              <span>
-                <Mic size={14} />
-                {summary}
-              </span>
+              <div className="name-preview" id="name-preview">
+                <span>EXEMPLO DO NOME</span>
+                <strong>{nameError ?? namePreview}</strong>
+              </div>
             </div>
+            <button
+              className="text-button"
+              disabled={locked}
+              onClick={() => update("title", defaultRecordingName)}
+            >
+              Restaurar padrão
+            </button>
+          </section>
+          <section
+            className="panel settings-panel"
+            aria-labelledby="storage-heading"
+          >
+            <div className="panel-heading">
+              <h2 id="storage-heading">Qualidade e armazenamento</h2>
+            </div>
+            <div>
+              <label className="field-label" htmlFor="resolution">
+                Qualidade
+              </label>
+              <select
+                id="resolution"
+                value={settings.resolution}
+                disabled={locked}
+                onChange={(e) => update("resolution", Number(e.target.value))}
+              >
+                <option value={1080}>1080p · Full HD</option>
+                <option value={720}>720p · Arquivo menor</option>
+              </select>
+            </div>
+            <label className="save-local-option">
+              <span>Manter uma cópia no computador</span>
+              <input
+                className="toggle"
+                type="checkbox"
+                checked={settings.keepLocal}
+                disabled={locked}
+                onChange={(e) => update("keepLocal", e.target.checked)}
+              />
+            </label>
             <div className="destination">
               <span>SEUS VÍDEOS FICAM AQUI</span>
               <button
                 title={folder || "Pasta de gravações"}
                 onClick={() => void recorder.chooseFolder()}
-                disabled={locked || loading}
+                disabled={locked || loading || !settings.keepLocal}
               >
                 <FolderOpen size={16} />
                 <span>{folder || "Carregando pasta…"}</span>
                 <ChevronRight size={15} />
               </button>
-            </div>
-            <p className="privacy-note">
-              <ShieldCheck size={13} /> Seu arquivo local é preservado após o
-              envio.
-            </p>
-          </aside>
+            </div>{" "}
+          </section>
+          <ShortcutsPanel />
+          <CloudPanel files={files} connectionOnly />
         </div>
-        <CloudPanel files={files} />
-        <section className="panel library" aria-labelledby="library-heading">
-          <div className="panel-heading">
-            <div className="library-title">
-              <h2 id="library-heading">Gravações recentes</h2>
-              <span className="count-badge">{files.length}</span>
-            </div>
-            <button
-              className="icon-button"
-              aria-label="Atualizar dispositivos e gravações"
-              title="Atualizar"
-              onClick={() => void recorder.refresh()}
-              disabled={loading || locked}
-            >
-              <RefreshCw size={16} className={loading ? "spin" : ""} />
-            </button>
-          </div>
-          {files.length === 0 ? (
-            <div className="empty-state">
-              <span>
-                <Video size={24} />
-              </span>
-              <div>
-                <strong>Seu primeiro vídeo começa acima</strong>
-                <p>As gravações salvas nesta pasta aparecem aqui.</p>
-              </div>
-            </div>
-          ) : (
-            <div className="file-list">
-              {files.map((file) => (
-                <div className="file-row" key={file.fileName}>
-                  <span className="file-icon">
-                    <Video size={19} />
-                  </span>
-                  <div className="file-info">
-                    <strong title={file.title}>{file.title}</strong>
-                    <p>
-                      {new Date(file.modifiedMs).toLocaleString("pt-BR", {
-                        dateStyle: "short",
-                        timeStyle: "short",
-                      })}
-                      <span>·</span>
-                      {file.duration === null
-                        ? "Duração não verificada"
-                        : duration(file.duration)}
-                      <span>·</span>
-                      {size(file.bytes)}
-                      {file.status === "failed" ? (
-                        <span className="file-warning">Conferir arquivo</span>
-                      ) : null}
-                    </p>
-                  </div>
-                  <button
-                    className="button file-open"
-                    onClick={() => void recorder.openFile(file.fileName)}
-                    disabled={!!pending}
-                    aria-label={`Abrir ${file.title}`}
-                  >
-                    <Play size={14} /> Abrir
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-        <p className="background-note">
-          Ao fechar no X, o Tinrec continua na bandeja com as gravações e envios
-          ativos.
-        </p>
+        <div hidden={view !== "library"}>
+          <RecordingLibrary
+            files={files}
+            folder={folder}
+            pending={!!pending}
+            loading={loading || locked}
+            onOpen={(name) => void recorder.openFile(name)}
+            onRefresh={() => void recorder.refresh()}
+            onRecord={() => setView("recorder")}
+          />
+        </div>
         <footer className="footer">
           <span>
             Tinrec <span>—</span> Feito para mostrar, explicar e compartilhar
@@ -538,20 +740,6 @@ export default function App() {
                   : "Desktop"}{" "}
             · v0.2
           </span>
-          <button
-            className="text-button"
-            onClick={() => void recorder.hide()}
-            disabled={!!pending}
-          >
-            Ocultar
-          </button>
-          <button
-            className="text-button"
-            onClick={() => void recorder.quit()}
-            disabled={!!pending}
-          >
-            Sair do Tinrec
-          </button>
         </footer>
       </main>
     </div>

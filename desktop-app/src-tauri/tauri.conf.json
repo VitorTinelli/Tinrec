@@ -14,18 +14,18 @@
       {
         "label": "main",
         "title": "Tinrec",
-        "width": 1080,
-        "height": 810,
-        "minWidth": 760,
-        "minHeight": 650,
+        "width": 820,
+        "height": 700,
+        "minWidth": 700,
+        "minHeight": 560,
         "center": true,
-        "backgroundColor": "#f6f7fb"
+        "backgroundColor": "#f7f8fa"
       },
       {
         "label": "controls",
-        "title": "Tinrec \u00b7 controles",
+        "title": "Tinrec · controles",
         "url": "index.html?window=controls",
-        "width": 490,
+        "width": 536,
         "height": 56,
         "resizable": false,
         "decorations": false,
@@ -33,19 +33,36 @@
         "skipTaskbar": true,
         "visible": false,
         "contentProtected": true,
-        "backgroundColor": "#1b2130",
+        "backgroundColor": "#1d2636",
         "center": true
+      },
+      {
+        "label": "webcam",
+        "title": "Tinrec · webcam",
+        "url": "index.html?window=webcam",
+        "width": 216,
+        "height": 216,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "contentProtected": true,
+        "transparent": true,
+        "shadow": false,
+        "backgroundColor": "#00000000"
       }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'; frame-src 'none'",
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; object-src 'none'; frame-src 'none'"
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "shortDescription": "Gravador local de tela e \u00e1udio",
+    "shortDescription": "Gravador local de tela e áudio",
     "category": "Video",
     "macOS": {
       "minimumSystemVersion": "13.0",

@@ -3,4 +3,5 @@
 <plist version="1.0"><dict>
   <key>NSMicrophoneUsageDescription</key><string>O Tinrec usa o microfone selecionado para gravar sua voz junto à tela.</string>
   <key>NSScreenCaptureUsageDescription</key><string>O Tinrec grava a tela e o áudio do computador somente quando você inicia uma gravação.</string>
+  <key>NSCameraUsageDescription</key><string>O Tinrec usa a câmera selecionada somente quando você inicia uma gravação de câmera.</string>
 </dict></plist>
