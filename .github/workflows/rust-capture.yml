@@ -1,0 +1,45 @@
+name: Rust capture prototype
+on:
+  push:
+    paths: ['desktop-rust/**', '.github/workflows/rust-capture.yml']
+  pull_request:
+    paths: ['desktop-rust/**', '.github/workflows/rust-capture.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pipeline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config clang libpipewire-0.3-dev libasound2-dev ffmpeg
+      - name: macOS encoder
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Windows encoder
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked -- --include-ignored
+      - run: cargo build --locked --release
+      - name: Upload diagnostic CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinrec-capture-${{ matrix.os }}
+          path: |
+            desktop-rust/target/release/tinrec-capture
+            desktop-rust/target/release/tinrec-capture.exe
+          if-no-files-found: error

@@ -10,3 +10,7 @@ dist/
 artifacts/
 *.user
 *.log
+**/target/
+desktop-app/dist/
+desktop-app/src-tauri/gen/
+__pycache__/
