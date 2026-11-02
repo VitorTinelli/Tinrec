@@ -196,7 +196,15 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 set_title("Teste de descarte")
                 navigate("Gravador")
                 click("button[data-capture-mode=screen]");state("Gravando")
-                wait_for("return document.querySelector('.preview-viewport img')?.naturalWidth > 0", "preview before discard")
+                deadline = time.monotonic() + 30
+                while True:
+                    result = invoke("get_snapshot")
+                    assert result["ok"], result
+                    snapshot = result["value"]
+                    if snapshot["phase"] == "recording" and snapshot["videoFrames"] > 0:
+                        break
+                    assert time.monotonic() < deadline, f"Capture did not produce frames before discard: {snapshot}"
+                    time.sleep(.15)
                 floating();click('button[aria-label="Descartar gravação"]')
                 wait_for("return !!document.querySelector('[role=alertdialog]')", "discard confirmation")
                 screenshot("discard-confirmation")

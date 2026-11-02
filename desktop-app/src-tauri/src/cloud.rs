@@ -816,6 +816,8 @@ mod tests {
                 Err(error) => panic!("{error}"),
             }
         };
+        // Windows may inherit the listener's nonblocking mode on accepted sockets.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
