@@ -1,9 +1,9 @@
 import { beforeEach, afterEach, it, expect, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { readFile } from "node:fs/promises";
 import request from "supertest";
 import { createApp } from "../server/app";
-import { hash } from "../server/security";
+import { createTestDatabase, createDriveMock } from "./support/server";
+import type { Database } from "../server/db";
 import { PART_BYTES, type TemporaryStorage } from "../server/temporary";
 let db: PGlite,
   app: ReturnType<typeof createApp>,
@@ -19,23 +19,7 @@ const post = (suffix: string) =>
     .post(`/api/recordings/${id}${suffix}`)
     .auth(device, { type: "bearer" });
 beforeEach(async () => {
-  vi.stubEnv("APP_URL", "https://tinrec.example");
-  vi.stubEnv("DATABASE_URL", "unused");
-  vi.stubEnv("GOOGLE_CLIENT_ID", "client");
-  vi.stubEnv("GOOGLE_CLIENT_SECRET", "secret");
-  vi.stubEnv("TOKEN_ENCRYPTION_KEY", Buffer.alloc(32).toString("base64"));
-  vi.stubEnv("CRON_SECRET", "cron-test-secret");
-  db = new PGlite();
-  await db.exec(
-    await readFile(new URL("../server/schema.sql", import.meta.url), "utf8"),
-  );
-  await db.query(
-    "INSERT INTO users(id,email) VALUES('owner','owner@example.test'),('other','other@example.test')",
-  );
-  await db.query(
-    "INSERT INTO sessions VALUES($1,'owner','device',now()+interval '1 day'),($2,'owner','web',now()+interval '1 day'),($3,'other','device',now()+interval '1 day')",
-    [hash(device), hash(web), hash("other")],
-  );
+  db = await createTestDatabase(device, web, "other");
   await db.query(
     "INSERT INTO recordings(id,owner_id,public_id,title,resolution) VALUES($1,'owner',$2,'Video',720)",
     [id, publicId],
@@ -59,11 +43,7 @@ beforeEach(async () => {
     remove: vi.fn(async () => {}),
     abort: vi.fn(async () => {}),
   };
-  app = createApp(
-    db as any,
-    { start: vi.fn(), complete: vi.fn(async () => {}), rename: vi.fn() },
-    storage,
-  );
+  app = createApp(db as unknown as Database, createDriveMock(), storage);
 });
 afterEach(async () => {
   await db.close();

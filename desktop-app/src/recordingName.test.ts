@@ -16,9 +16,9 @@ describe("nomes das gravações", () => {
     expect(recordingNameError(defaultRecordingName, title)).toBeNull();
   });
   it("mantém nomes fixos e resolve variáveis repetidas com o mesmo valor", () => {
-    expect(resolveRecordingName("Reunião do time", new Date(), "Tela")).toBe(
-      "Reunião do time",
-    );
+    expect(
+      resolveRecordingName("Reunião do time", new Date(2026, 0, 2), "Tela"),
+    ).toBe("Reunião do time");
     expect(
       resolveRecordingName(
         "{dia}-{mes}-{ano}-{aleatorio}-{aleatorio}",
@@ -28,22 +28,29 @@ describe("nomes das gravações", () => {
       ),
     ).toBe("02-01-2026-abc123-abc123");
   });
-  it("rejeita nomes vazios, variáveis desconhecidas e nomes incompatíveis com arquivos", () => {
-    for (const template of [
-      "",
-      "   ",
-      "...",
-      "{desconhecida}",
-      "{data",
-      "Reunião/cliente",
-      "x".repeat(91),
-    ]) {
-      expect(
-        recordingNameError(
-          template,
-          resolveRecordingName(template, new Date(), "Tela"),
-        ),
-      ).not.toBeNull();
-    }
+  it.each([
+    ["", "Informe um nome ou modelo para o vídeo em Configurações."],
+    ["   ", "Informe um nome ou modelo para o vídeo em Configurações."],
+    ["{desconhecida}", "Use apenas as variáveis disponíveis abaixo."],
+    ["{data", "Use apenas as variáveis disponíveis abaixo."],
+    ["x".repeat(91), "O nome gerado deve ter no máximo 90 caracteres."],
+    ["界".repeat(54), "O nome gerado deve ter no máximo 90 caracteres."],
+    ...["...", "Reunião/cliente", ".oculto", "final."].map((template) => [
+      template,
+      "O nome não pode conter caracteres reservados para arquivos, como /, : ou ?.",
+    ]),
+  ])("rejeita o modelo %j com o motivo correto", (template, error) => {
+    expect(
+      recordingNameError(
+        template,
+        resolveRecordingName(template, new Date(2026, 0, 2), "Tela"),
+      ),
+    ).toBe(error);
   });
+  it.each(["x".repeat(90), "界".repeat(53)])(
+    "aceita o limite válido %j",
+    (template) => {
+      expect(recordingNameError(template, template)).toBeNull();
+    },
+  );
 });

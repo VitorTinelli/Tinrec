@@ -65,6 +65,22 @@ def click(selector):
     command("POST", f"/element/{element(selector)}/click", {})
 
 
+def navigate(name):
+    selector = f'//nav[@aria-label="Espaço de trabalho"]/button[starts-with(normalize-space(.), {json.dumps(name)})]'
+    result = command("POST", "/element", {"using": "xpath", "value": selector})
+    target = result["element-6066-11e4-a52e-4f735466cecf"]
+    command("POST", f"/element/{target}/click", {})
+    wait_for(f"return [...document.querySelectorAll('.workspace-nav > button')].some(button => button.textContent.trim().startsWith({json.dumps(name)}) && button.getAttribute('aria-current') === 'page')", f"navigation to {name}")
+
+
+def set_title(value):
+    navigate("Configurações")
+    wait_for("const input=document.querySelector('#title');return input && !input.disabled && input.getClientRects().length > 0", "editable recording title")
+    title = element("#title")
+    command("POST", f"/element/{title}/clear", {})
+    command("POST", f"/element/{title}/value", {"text": value})
+
+
 def screenshot(name):
     args.artifacts.joinpath(name + ".png").write_bytes(base64.b64decode(command("GET", "/screenshot")))
 
@@ -127,11 +143,8 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 command("POST","/window",{"handle":controls_handle})
             reports = []
             for index in range(0 if args.background else (1 if args.native else 2)):
-                click('.workspace-nav > button:nth-of-type(3)')
-                title = element("#title")
-                command("POST", f"/element/{title}/clear", {})
-                command("POST", f"/element/{title}/value", {"text": f"Teste da interface {index + 1}"})
-                click('.workspace-nav > button:nth-of-type(1)')
+                set_title(f"Teste da interface {index + 1}")
+                navigate("Gravador")
                 click("button[data-capture-mode=screen]")
                 state("Gravando")
                 time.sleep(1.1)
@@ -163,11 +176,12 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 click(".record-actions .stop-button")
                 state("Vídeo salvo")
                 wait_for(f"return document.querySelectorAll('.video-card').length >= {index + 1}", "recording in library")
-                click('.workspace-nav > button:nth-of-type(2)')
+                navigate("Meus vídeos")
                 wait_for("return document.querySelector('.video-thumbnail img')?.naturalWidth > 0", "video thumbnail")
                 screenshot(f"completed-{index + 1}")
-                click('.workspace-nav > button:nth-of-type(1)')
+                navigate("Gravador")
                 paths = sorted(Path(data_dir, "Recordings").glob("*.capture.json"), key=lambda path: path.stat().st_mtime_ns)
+                assert len(paths) == index + 1, f"Expected {index + 1} reports, got {paths}"
                 report = json.loads(paths[-1].read_text())
                 assert report["status"] == "completed", report.get("error")
                 assert report["checks"]["passed"], report["checks"]
@@ -179,10 +193,8 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 reports.append(report["checks"])
             if args.controls:
                 assert not args.native, "Discard smoke test is restricted to the synthetic source"
-                title=element("#title")
-                command("POST",f"/element/{title}/clear",{})
-                command("POST",f"/element/{title}/value",{"text":"Teste de descarte"})
-                click('.workspace-nav > button:nth-of-type(1)')
+                set_title("Teste de descarte")
+                navigate("Gravador")
                 click("button[data-capture-mode=screen]");state("Gravando")
                 wait_for("return document.querySelector('.preview-viewport img')?.naturalWidth > 0", "preview before discard")
                 floating();click('button[aria-label="Descartar gravação"]')
@@ -206,8 +218,8 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 assert invoke("get_snapshot")["ok"], "Closing idle main window killed the app"
                 tray_call("/StatusNotifierItem","org.kde.StatusNotifierItem.Activate","0","0")
                 wait_for("return document.visibilityState === 'visible'", "main window reopened from tray")
-                title=element("#title");command("POST",f"/element/{title}/clear",{});command("POST",f"/element/{title}/value",{"text":"Teste em segundo plano"})
-                click('.workspace-nav > button:nth-of-type(1)')
+                set_title("Teste em segundo plano")
+                navigate("Gravador")
                 click("button[data-capture-mode=screen]");state("Gravando");assert invoke("hide_to_tray")["ok"]
                 first=invoke("get_snapshot")["value"];time.sleep(.8);second=invoke("get_snapshot")["value"]
                 assert second["phase"]=="recording" and second["elapsedSeconds"]>first["elapsedSeconds"]+.3, "Closing main window stopped the capture"
@@ -228,6 +240,13 @@ with tempfile.TemporaryDirectory(prefix="tinrec-desktop-") as data_dir:
                 names=subprocess.check_output(["gdbus","call","--session","--dest","org.freedesktop.DBus","--object-path","/org/freedesktop/DBus","--method","org.freedesktop.DBus.ListNames"],text=True)
                 assert tray not in names,"Explicit quit left the tray service running"
             print(json.dumps({"native_window": True,"preview_and_floating_controls": args.controls,"discarded_files_removed":args.controls,"background_lifecycle":args.background, "mode": "native" if args.native else "synthetic", "sessions": reports}, indent=2))
+        except Exception:
+            if session:
+                try:
+                    screenshot("failure")
+                except (OSError, RuntimeError):
+                    pass
+            raise
         finally:
             if session:
                 try:

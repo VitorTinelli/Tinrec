@@ -240,7 +240,10 @@ mod tests {
         }
         assert_eq!(
             microphone_mono(&[0.8f32, -0.4], 1),
-            microphone_mono(&[0.8f32, 0.8, -0.4, -0.4], 2)
+            [0.8f32, -0.4]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
         );
     }
     #[test]

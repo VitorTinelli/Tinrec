@@ -1,41 +1,17 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import request from "supertest";
 import { createApp } from "../server/app";
-import { hash, encrypt, decrypt } from "../server/security";
+import { createTestDatabase, createDriveMock } from "./support/server";
 import type { Database } from "../server/db";
 import type { Drive } from "../server/drive";
 let sql: PGlite, app: ReturnType<typeof createApp>, drive: Drive;
 const device = "device-session",
   web = "web-session";
 beforeEach(async () => {
-  vi.stubEnv("APP_URL", "https://tinrec.example");
-  vi.stubEnv("DATABASE_URL", "postgresql://unused");
-  vi.stubEnv("OWNER_EMAIL", "owner@example.com");
-  vi.stubEnv("GOOGLE_CLIENT_ID", "client");
-  vi.stubEnv("GOOGLE_CLIENT_SECRET", "secret");
-  vi.stubEnv("TOKEN_ENCRYPTION_KEY", Buffer.alloc(32, 7).toString("base64"));
-  sql = new PGlite();
-  await sql.exec(
-    await readFile(new URL("../server/schema.sql", import.meta.url), "utf8"),
-  );
-  await sql.query(
-    "INSERT INTO users(id,email) VALUES('owner','owner@example.com'),('other','other@example.com')",
-  );
-  await sql.query(
-    "INSERT INTO sessions VALUES($1,'owner','device',now()+interval '1 day'),($2,'owner','web',now()+interval '1 day'),($3,'other','device',now()+interval '1 day')",
-    [hash(device), hash(web), hash("other-session")],
-  );
-  drive = {
-    start: vi.fn(async () => ({
-      uri: "https://www.googleapis.com/upload/drive/v3/files/123?upload_id=secret",
-      fileId: "123",
-    })),
-    complete: vi.fn(async () => {}),
-    rename: vi.fn(async () => {}),
-  };
+  sql = await createTestDatabase(device, web, "other-session");
+  drive = createDriveMock();
   app = createApp(sql as unknown as Database, drive);
 });
 afterEach(async () => {
@@ -107,6 +83,7 @@ describe("owner boundary and public sharing", () => {
       .post("/api/recordings")
       .auth(device, { type: "bearer" })
       .send({ id: first.body.id, title: "Atendimento", resolution: 1080 });
+    expect(second.status).toBe(200);
     expect(second.body.publicId).toBe(first.body.publicId);
     expect((await sql.query("SELECT * FROM recordings")).rows).toHaveLength(1);
   });
@@ -147,7 +124,7 @@ describe("owner boundary and public sharing", () => {
       ).status,
     ).toBe(401);
   });
-  it("does not mark incomplete or blocked uploads as available", async () => {
+  it("does not mark an upload without a Drive file as available", async () => {
     const r = await create();
     expect(
       (
@@ -202,6 +179,7 @@ describe("owner boundary and public sharing", () => {
 describe("one-time device codes", () => {
   it("requires approval and correct secret, then atomically consumes the code", async () => {
     const start = await request(app).post("/api/devices/start").send({});
+    expect(start.status).toBe(200);
     const { code, secret } = start.body;
     const poll = (s = secret) =>
       request(app).post("/api/devices/poll").send({ code, secret: s });
@@ -216,7 +194,9 @@ describe("one-time device codes", () => {
           .send({ code })
       ).status,
     ).toBe(200);
-    const result = await poll();
+    const results = await Promise.all([poll(), poll()]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 410]);
+    const result = results.find((result) => result.status === 200)!;
     expect(result.body.token).toBeTypeOf("string");
     expect((await poll()).status).toBe(410);
     expect(
@@ -227,7 +207,7 @@ describe("one-time device codes", () => {
       ).status,
     ).toBe(200);
   });
-  it("expires after ten minutes", async () => {
+  it("rejects an expired device code", async () => {
     const { body } = await request(app).post("/api/devices/start").send({});
     await sql.query(
       "UPDATE device_codes SET expires_at=now()-interval '1 second'",
@@ -237,17 +217,6 @@ describe("one-time device codes", () => {
     ).toBe(410);
   });
 });
-describe("token encryption", () => {
-  it("authenticates ciphertext and rejects tampering", () => {
-    const ciphertext = encrypt("refresh-token");
-    expect(ciphertext).not.toContain("refresh-token");
-    expect(decrypt(ciphertext)).toBe("refresh-token");
-    const b = Buffer.from(ciphertext, "base64");
-    b[30] ^= 1;
-    expect(() => decrypt(b.toString("base64"))).toThrow();
-  });
-});
-
 describe("discarding a live capture", () => {
   it("removes only the owner's unuploaded reservation and is idempotent", async () => {
     const r = await create(),

@@ -48,6 +48,7 @@ it("requires the owner to test the Drive player before confirming", async () => 
   expect(container.querySelector("iframe")?.src).toBe(video.embedUrl);
   fireEvent.click(screen.getByText("Assisti no Drive; confirmar reprodução"));
   await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+  expect(fetch).toHaveBeenCalledOnce();
   expect(fetch).toHaveBeenCalledWith(
     "/api/public/id/drive-ready",
     expect.objectContaining({ method: "POST" }),
@@ -62,7 +63,9 @@ it("uses Drive after confirmation", () => {
     />,
   );
   expect(container.querySelector("video")).toBeNull();
-  expect(container.querySelector("iframe")).toBeTruthy();
+  expect(container.querySelector("iframe")?.getAttribute("src")).toBe(
+    video.embedUrl,
+  );
 });
 
 it("preserves playback position when the signed URL is renewed", () => {
@@ -80,6 +83,7 @@ it("preserves playback position when the signed URL is renewed", () => {
     />,
   );
   expect(container.querySelector("video")).toBe(element);
+  expect(element.getAttribute("src")).toBe("https://r2.example/renewed");
   element.currentTime = 0;
   Object.defineProperty(element, "duration", {
     value: 100,

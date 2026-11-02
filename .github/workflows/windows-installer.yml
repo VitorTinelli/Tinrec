@@ -37,8 +37,6 @@ jobs:
           & "$destination/bin/ffprobe.exe" -version
           if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed' }
       - run: npm ci
-      - name: Check interface
-        run: npx vitest run desktop-app/src
       - name: Build Windows x64 installer
         run: npm run desktop:package -- --bundles nsis --target x86_64-pc-windows-msvc
       - name: Prepare installer

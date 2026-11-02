@@ -791,6 +791,72 @@ fn parse_range(range: Option<&str>, total: u64) -> Reply<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // One bounded HTTP reader for all upload scenarios. EOF must fail immediately.
+    fn read_test_request(
+        listener: &std::net::TcpListener,
+        path: &str,
+    ) -> (
+        std::io::BufReader<std::net::TcpStream>,
+        Vec<u8>,
+        Option<String>,
+    ) {
+        use std::io::{BufRead, BufReader};
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(connection) => break connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "mock request timeout: {path}"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "missing request: {path}"
+        );
+        assert!(line.starts_with(path), "{line} != {path}");
+        let mut length = 0;
+        let mut range = None;
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "mock headers timeout: {path}"
+            );
+            line.clear();
+            assert!(
+                reader.read_line(&mut line).unwrap() > 0,
+                "truncated headers: {path}"
+            );
+            if line == "\r\n" {
+                break;
+            }
+            let lower = line.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+            if let Some(value) = lower.strip_prefix("content-range:") {
+                range = Some(value.trim().to_string());
+            }
+        }
+        assert!(length <= CHUNK, "unexpected body size: {length}");
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).unwrap();
+        (reader, bytes, range)
+    }
     #[test]
     fn restrict_upload_destination() {
         assert!(
@@ -935,10 +1001,7 @@ mod tests {
     }
     #[test]
     fn resumes_chunks_after_restart_and_finalizes_once() {
-        use std::{
-            io::{BufRead, BufReader, Write},
-            net::TcpListener,
-        };
+        use std::{io::Write, net::TcpListener};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let base = origin.clone();
@@ -1012,48 +1075,9 @@ mod tests {
             ];
             listener.set_nonblocking(true).unwrap();
             for (path, range, status, body, extra) in steps {
-                let started = std::time::Instant::now();
-                let (stream, _) = loop {
-                    match listener.accept() {
-                        Ok(v) => break v,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(
-                                started.elapsed() < Duration::from_secs(20),
-                                "mock request timeout: {path}"
-                            );
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(e) => panic!("{e}"),
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                assert!(line.starts_with(&path), "{line} != {path}");
-                let mut length = 0;
-                let mut received_range = None;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    let lower = line.to_ascii_lowercase();
-                    if let Some(v) = lower.strip_prefix("content-length:") {
-                        length = v.trim().parse::<usize>().unwrap();
-                    }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-range:") {
-                        received_range = Some(v.trim().to_string());
-                    }
-                }
+                let (mut reader, contents, received_range) = read_test_request(&listener, &path);
                 assert_eq!(received_range, range);
-                assert!(length <= CHUNK);
-                let mut contents = vec![0; length];
-                reader.read_exact(&mut contents).unwrap();
-                if path.starts_with("PUT") && length > 0 {
+                if path.starts_with("PUT") && !contents.is_empty() {
                     assert!(contents.iter().all(|b| *b == 42));
                 }
                 let reply = format!(
@@ -1108,10 +1132,7 @@ mod tests {
     }
     #[test]
     fn temporary_upload_survives_restart_before_drive_stage() {
-        use std::{
-            io::{BufRead, BufReader, Write},
-            net::TcpListener,
-        };
+        use std::{io::Write, net::TcpListener};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let site = format!("http://{}", listener.local_addr().unwrap());
         let origin = site.clone();
@@ -1133,38 +1154,8 @@ mod tests {
                 ),
             ];
             for (path, body) in steps {
-                let deadline = std::time::Instant::now() + Duration::from_secs(15);
-                let (stream, _) = loop {
-                    match listener.accept() {
-                        Ok(v) => break v,
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(std::time::Instant::now() < deadline);
-                            std::thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(e) => panic!("{e}"),
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .unwrap();
-                let mut reader = BufReader::new(stream);
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                assert!(line.starts_with(path));
-                let mut length = 0;
-                loop {
-                    line.clear();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        length = v.trim().parse::<usize>().unwrap();
-                    }
-                }
-                assert!(length < 1000);
-                let mut bytes = vec![0; length];
-                reader.read_exact(&mut bytes).unwrap();
+                let (mut reader, bytes, _) = read_test_request(&listener, path);
+                assert!(bytes.len() < 1000);
                 if path.starts_with("PUT") {
                     assert_eq!(bytes, vec![42; 10]);
                 }
@@ -1205,30 +1196,13 @@ mod tests {
     }
     #[test]
     fn discarded_capture_never_enters_upload_even_if_its_file_is_missing() {
-        use std::{
-            io::{BufRead, BufReader, Write},
-            net::TcpListener,
-        };
+        use std::{io::Write, net::TcpListener};
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let site = format!("http://{}", listener.local_addr().unwrap());
         let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            assert!(line.starts_with("POST /api/recordings/id/discard "));
-            loop {
-                line.clear();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            let mut body = [0; 2];
-            reader.read_exact(&mut body).unwrap();
+            let (mut reader, body, _) =
+                read_test_request(&listener, "POST /api/recordings/id/discard ");
+            assert_eq!(body, b"{}");
             reader
                 .get_mut()
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")

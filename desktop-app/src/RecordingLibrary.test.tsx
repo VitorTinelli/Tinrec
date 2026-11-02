@@ -27,7 +27,7 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
-it("busca vídeos, abre o arquivo correto e carrega miniaturas reais", async () => {
+it("busca vídeos, abre o arquivo correto e carrega as miniaturas retornadas pelo backend", async () => {
   vi.mocked(call).mockResolvedValue("data:image/jpeg;base64,dGVzdA==");
   const onOpen = vi.fn(),
     user = userEvent.setup();
@@ -64,6 +64,16 @@ it("busca vídeos, abre o arquivo correto e carrega miniaturas reais", async () 
       fileName: "demo.mp4",
     }),
   );
+  for (const title of ["Demonstração", "Reunião"]) {
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: `Abrir ${title}` })
+          .querySelector("img")
+          ?.getAttribute("src"),
+      ).toBe("data:image/jpeg;base64,dGVzdA=="),
+    );
+  }
   expect(screen.getByText("00:35")).not.toBeNull();
   await user.click(screen.getByRole("button", { name: "Ver no site" }));
   expect(call).toHaveBeenCalledWith("cloud_open", { id: null });
@@ -73,8 +83,12 @@ it("busca vídeos, abre o arquivo correto e carrega miniaturas reais", async () 
   ).toBeNull();
   await user.click(screen.getByRole("button", { name: "Abrir Reunião" }));
   expect(onOpen).toHaveBeenCalledWith("reuniao.mp4");
-  await user.click(screen.getByRole("button", { name: "Abrir Reunião no site" }));
-  expect(call).toHaveBeenCalledWith("cloud_open_recording", { fileName: "reuniao.mp4" });
+  await user.click(
+    screen.getByRole("button", { name: "Abrir Reunião no site" }),
+  );
+  expect(call).toHaveBeenCalledWith("cloud_open_recording", {
+    fileName: "reuniao.mp4",
+  });
   await user.clear(screen.getByRole("searchbox"));
   await user.type(screen.getByRole("searchbox"), "inexistente");
   expect(screen.getByText("Nenhum vídeo encontrado")).not.toBeNull();

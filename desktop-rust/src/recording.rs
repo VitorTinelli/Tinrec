@@ -1066,8 +1066,17 @@ mod tests {
             Duration::from_secs(1),
         );
         assert_eq!(packets.len(), 2);
-        assert_eq!(packets[0].data.len(), 3 * 4);
-        assert_eq!(packets[1].data.len(), 3 * 4);
-        assert_eq!(packets[1].pts_ms, 3);
+        assert_eq!((packets[0].track, packets[0].pts_ms), (2, 0));
+        assert_eq!((packets[1].track, packets[1].pts_ms), (2, 3));
+        for (packet, expected) in packets.iter().zip([[0., 1., 2.], [7., 8., 9.]]) {
+            let values: Vec<_> = packet
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect();
+            assert_eq!(values, expected);
+        }
     }
 }

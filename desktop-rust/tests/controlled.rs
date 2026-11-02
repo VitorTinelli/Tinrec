@@ -1,4 +1,9 @@
-use std::{path::Path, sync::mpsc, thread, time::Duration};
+use std::{
+    path::Path,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 use tinrec_capture::{
     RecordOptions,
     recording::{self, Control},
@@ -31,6 +36,39 @@ fn options(output: &Path) -> RecordOptions {
     }
 }
 
+// The deadline covers the entire transition: unrelated progress must not reset it.
+fn wait_for_progress(
+    events: &mpsc::Receiver<recording::Progress>,
+    label: &str,
+    predicate: impl Fn(&recording::Progress) -> bool,
+) -> recording::Progress {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "Timed out waiting for {label}");
+        let event = events
+            .recv_timeout(remaining)
+            .unwrap_or_else(|error| panic!("Waiting for {label}: {error}"));
+        if predicate(&event) {
+            return event;
+        }
+    }
+}
+
+fn finish_engine<T>(engine: thread::JoinHandle<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(70);
+    while !engine.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "Recording engine did not finalize within 70 s"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    engine
+        .join()
+        .unwrap_or_else(|error| std::panic::resume_unwind(error))
+}
+
 #[test]
 #[ignore = "requires FFmpeg and ffprobe"]
 fn desktop_control_channel_can_pause_resume_stop_and_start_a_second_session() {
@@ -45,26 +83,24 @@ fn desktop_control_channel_can_pause_resume_stop_and_start_a_second_session() {
                 let _ = progress.send(event);
             })
         });
-        let wait_for = |state: &str| {
-            loop {
-                let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
-                if event.state == state {
-                    break event;
-                }
-            }
-        };
+        let wait_for =
+            |state: &str| wait_for_progress(&events, state, |event| event.state == state);
         wait_for("recording");
-        thread::sleep(Duration::from_millis(350));
+        wait_for_progress(&events, "active capture before pause", |event| {
+            event.active_seconds >= 0.35
+        });
         controls.send(Control::Pause).unwrap();
         let paused = wait_for("paused");
         let still_paused = wait_for("paused");
         assert!((paused.active_seconds - still_paused.active_seconds).abs() < 0.01);
         controls.send(Control::Resume).unwrap();
         wait_for("recording");
-        thread::sleep(Duration::from_millis(350));
+        wait_for_progress(&events, "active capture after resume", |event| {
+            event.active_seconds >= paused.active_seconds + 0.35
+        });
         controls.send(Control::Stop).unwrap();
         wait_for("finalizing");
-        let report = engine.join().unwrap().unwrap();
+        let report = finish_engine(engine).unwrap();
         assert_eq!(report.status, "completed", "{:?}", report.error);
         assert!(report.active_seconds < 3.0);
         assert!((report.audio_peak[0] - 0.08).abs() < 0.001);
@@ -98,11 +134,8 @@ fn live_preview_and_mute_controls_affect_the_recorded_audio() {
         )
         .unwrap()
     });
-    let wait = |predicate: &dyn Fn(&recording::Progress) -> bool| loop {
-        let event = events.recv_timeout(Duration::from_secs(10)).unwrap();
-        if predicate(&event) {
-            break event;
-        }
+    let wait = |predicate: &dyn Fn(&recording::Progress) -> bool| {
+        wait_for_progress(&events, "mute control acknowledgment", predicate)
     };
     wait(&|p| p.state == "recording" && p.active_seconds > 0.3);
     controls.send(Control::SetMicrophoneMuted(true)).unwrap();
@@ -118,7 +151,7 @@ fn live_preview_and_mute_controls_affect_the_recorded_audio() {
     });
     let end = wait(&|p| p.active_seconds > both.active_seconds + 0.6);
     controls.send(Control::Stop).unwrap();
-    let report = engine.join().unwrap();
+    let report = finish_engine(engine);
     assert_eq!(report.status, "completed", "{:?}", report.error);
     let frames = previews.lock().unwrap();
     assert!(!frames.is_empty());
@@ -238,7 +271,6 @@ fn area_selection_happens_before_recording_and_output_is_cropped() {
     assert_eq!(probe["streams"][0]["height"], 720);
 }
 #[test]
-#[ignore = "requires FFmpeg and ffprobe"]
 fn cancelling_area_selection_does_not_create_a_video() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("cancel.mp4");

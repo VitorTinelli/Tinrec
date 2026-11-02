@@ -1,0 +1,19 @@
+name: Windows legacy queue tests
+on:
+  push:
+    paths: ['desktop/**', '.github/workflows/windows-queue-tests.yml']
+  pull_request:
+    paths: ['desktop/**', '.github/workflows/windows-queue-tests.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - run: dotnet run --project desktop/Tinrec.Tests/Tinrec.Tests.csproj -p:Platform=x64

@@ -1,9 +1,9 @@
 name: Tinrec desktop
 on:
   push:
-    paths: ['desktop-app/**', 'desktop-rust/**', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
+    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/test-desktop.py', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
   pull_request:
-    paths: ['desktop-app/**', 'desktop-rust/**', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
+    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/test-desktop.py', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,7 +17,7 @@ jobs:
             bundle: deb
           - os: windows-latest
             bundle: nsis
-          - os: macos-14
+          - os: macos-15
             bundle: app
     runs-on: ${{ matrix.os }}
     steps:
@@ -51,21 +51,28 @@ jobs:
           Copy-Item (Join-Path (Split-Path $encoder.DirectoryName -Parent) 'LICENSE') "$destination/licenses/FFmpeg-LICENSE.txt"
       - run: npm ci
       - run: npm run desktop:web:build
-      - name: Interface tests
-        run: npx vitest run desktop-app/src/App.test.tsx tests/desktop-cloud.test.tsx tests/recorder-controls.test.tsx
       - run: cargo fmt --manifest-path desktop-app/src-tauri/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path desktop-app/src-tauri/Cargo.toml --all-targets --features custom-protocol -- -D warnings
-      - run: cargo test --locked --manifest-path desktop-rust/Cargo.toml -- --include-ignored
-      - run: cargo test --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol
+      - name: Desktop backend tests
+        timeout-minutes: 10
+        run: cargo test --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol -- --include-ignored --nocapture --test-threads=1
       - name: Native Linux interface test
+        timeout-minutes: 10
         if: runner.os == 'Linux'
         env:
           WEBKIT_DISABLE_DMABUF_RENDERER: '1'
         run: |
           cargo install tauri-driver --locked
           cargo build --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol
-          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --controls
-          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --background
+          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --controls --artifacts artifacts/desktop-controls
+          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --background --artifacts artifacts/desktop-background
+      - name: Upload native test diagnostics
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-test-diagnostics
+          path: artifacts/desktop-*
+          if-no-files-found: ignore
       - name: Build native package
         run: npm run desktop:package -- --bundles ${{ matrix.bundle }}
       - uses: actions/upload-artifact@v4

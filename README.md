@@ -90,12 +90,14 @@ Requisitos: Node.js 22+ e SDK .NET 8 para Windows. O SDK baixado durante esta im
 ```powershell
 npm ci
 npm run dev            # http://localhost:5173, UI e API juntas
-npm test               # testes de API com PostgreSQL PGlite isolado
+npm test               # API, site e interface desktop; PGlite isolado
 npm run build
 dotnet build desktop/Tinrec/Tinrec.csproj -p:Platform=x64
 dotnet run --project desktop/Tinrec.Tests/Tinrec.Tests.csproj -p:Platform=x64
 dotnet run --project desktop/Tinrec.Diagnostics/Tinrec.Diagnostics.csproj -p:Platform=x64 -- 8 artifacts/test.mp4 --pause
 ```
+
+Consulte [TESTING.md](TESTING.md) para os comandos de cada camada, dependências e divisão da suíte na CI.
 
 O diagnóstico abre uma janela própria e grava a área dela. Opções: `--720`, `--full`, `--mic`, `--system`, `--pause`. O primeiro argumento é a duração em segundos; o segundo é o MP4 de saída. Ele salva um relatório JSON com CPU, memória e contagem de callbacks de quadros. A contagem efetiva de quadros do arquivo deve ser medida com `ffprobe`; callbacks não equivalem necessariamente a quadros codificados.
 

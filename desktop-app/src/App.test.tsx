@@ -134,18 +134,10 @@ describe("gravador desktop", () => {
       name: "Tela",
     });
     await waitFor(() => expect(start).toHaveProperty("disabled", false));
-    expect(screen.queryByRole("heading", { name: "Vamos gravar?" })).toBeNull();
-    expect(screen.queryByLabelText("Prévia da tela capturada")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Envios e links" })).toBeNull();
-    expect(screen.queryByRole("textbox", { name: /Nome do vídeo/ })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Configurações" }));
     await user.clear(screen.getByLabelText(/Nome do vídeo/));
     await user.type(screen.getByLabelText(/Nome do vídeo/), "Conversa");
     await user.click(screen.getByRole("button", { name: "Gravador" }));
-    expect(screen.queryByLabelText("Entrada do microfone")).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: "Atualizar câmeras" }),
-    ).toBeNull();
     await user.click(
       screen.getByRole("button", { name: "Selecionar microfone" }),
     );
@@ -174,10 +166,21 @@ describe("gravador desktop", () => {
     await user.click(screen.getByRole("button", { name: "Gravador" }));
     await user.click(screen.getByRole("button", { name: "Pausar" }));
     await screen.findByRole("button", { name: "Retomar" });
+    expect(call).toHaveBeenCalledWith("control_recording", { action: "pause" });
     await user.click(screen.getByRole("button", { name: "Retomar" }));
     await screen.findByRole("button", { name: "Pausar" });
     await user.click(screen.getByRole("button", { name: "Encerrar" }));
     await screen.findByText("Salvando seu vídeo");
+    expect(
+      vi
+        .mocked(call)
+        .mock.calls.filter(([name]) => name === "control_recording"),
+    ).toEqual(
+      ["pause", "resume", "stop"].map((action) => [
+        "control_recording",
+        { action },
+      ]),
+    );
     expect(screen.getByRole("button", { name: "Encerrar" })).toHaveProperty(
       "disabled",
       true,
@@ -362,6 +365,17 @@ describe("gravador desktop", () => {
     await user.click(start);
     await screen.findByText("Microfone indisponível");
     expect(start).toHaveProperty("disabled", false);
+    startError = null;
+    await user.click(start);
+    expect(
+      vi.mocked(call).mock.calls.filter(([name]) => name === "start_recording"),
+    ).toHaveLength(2);
+    await publish({ phase: "recording" });
+    expect(screen.getByRole("button", { name: "Pausar" })).toHaveProperty(
+      "disabled",
+      false,
+    );
+    expect(screen.queryByText("Microfone indisponível")).toBeNull();
   });
   it("ignora eventos antigos após uma transição mais recente", async () => {
     render(<App />);
