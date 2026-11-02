@@ -31,7 +31,7 @@ jobs:
           components: rustfmt, clippy
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libdbus-1-dev clang libwebkit2gtk-4.1-dev libpipewire-0.3-dev libasound2-dev librsvg2-dev ffmpeg webkit2gtk-driver xvfb
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libdbus-1-dev libayatana-appindicator3-dev clang libwebkit2gtk-4.1-dev libpipewire-0.3-dev libasound2-dev librsvg2-dev ffmpeg webkit2gtk-driver xvfb
       - name: macOS encoder
         if: runner.os == 'macOS'
         run: brew install ffmpeg
