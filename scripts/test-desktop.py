@@ -66,7 +66,7 @@ def click(selector):
 
 
 def navigate(name):
-    selector = f'//nav[@aria-label="Espaço de trabalho"]/button[starts-with(normalize-space(.), {json.dumps(name)})]'
+    selector = f'//nav[@aria-label="Espaço de trabalho"]/button[starts-with(normalize-space(.), {json.dumps(name, ensure_ascii=False)})]'
     result = command("POST", "/element", {"using": "xpath", "value": selector})
     target = result["element-6066-11e4-a52e-4f735466cecf"]
     command("POST", f"/element/{target}/click", {})

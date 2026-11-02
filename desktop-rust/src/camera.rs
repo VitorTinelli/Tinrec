@@ -321,6 +321,7 @@ mod tests {
             "color=blue:s=320x240:r=30",
         ]);
         let mut camera = Camera::from_input(cmd, &options, BackendPreference::Auto, None).unwrap();
+        eprintln!("camera decoder started: pid={}", camera.child.id());
         let frame = match camera.next_event(Some(Duration::from_secs(5))).unwrap() {
             CaptureEvent::Video(frame) => frame,
             _ => panic!("Expected video"),
@@ -330,7 +331,9 @@ mod tests {
         let center = (360 * 1280 + 640) * 4;
         assert!(bytes[center] > 240 && bytes[center + 1] < 10 && bytes[center + 2] < 10);
         assert_eq!(&bytes[..3], &[0, 0, 0]);
+        eprintln!("camera frame verified; stopping decoder");
         camera.stop().unwrap();
+        eprintln!("camera decoder stopped");
         assert!(camera.child.try_wait().unwrap().is_some());
         assert!(camera.reader.is_none());
     }
