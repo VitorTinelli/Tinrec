@@ -1,5 +1,4 @@
 import { DeviceCard } from "./DeviceCard";
-import { AreaSelector } from "./AreaSelector";
 import { ShortcutsPanel } from "./ShortcutsPanel";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -28,7 +27,6 @@ import {
   Settings2,
   AppWindow,
   Scan,
-  Video,
 } from "lucide-react";
 import { duration, type Phase, type CaptureMode } from "./bridge";
 import { AudioMuteButtons, DiscardControl } from "./RecordingControls";
@@ -83,6 +81,7 @@ function AudioControl({
           aria-label={`Gravar ${name.toLowerCase()}`}
         />
       </div>
+      <span className="device-card-name">Padrão do sistema</span>
       <div className="volume-row">
         <label className="sr-only" htmlFor={`${kind}-volume`}>
           Volume do {name.toLowerCase()}
@@ -204,12 +203,6 @@ export default function App() {
     }
     const next = { ...settings, ...overrides, captureMode: mode };
     if (
-      mode === "camera" &&
-      (!next.camera ||
-        !(sources?.cameras ?? []).some((camera) => camera.id === next.camera))
-    )
-      return;
-    if (
       mode === "window" &&
       !sources?.wayland &&
       (!next.window ||
@@ -274,12 +267,6 @@ export default function App() {
           </p>
         </div>
       </nav>
-      <AreaSelector
-        key={snapshot.sessionId ?? "idle"}
-        snapshot={snapshot}
-        enabled={settings.captureMode === "area"}
-        onCancel={() => void recorder.control("discard")}
-      />
       <main ref={mainRef}>
         <div className="page-heading">
           <div>
@@ -438,7 +425,6 @@ export default function App() {
                   ["screen", "Tela", Monitor],
                   ["window", "Janela", AppWindow],
                   ["area", "Área", Scan],
-                  ["camera", "Somente câmera", Video],
                 ] as const
               ).map(([mode, label, Icon]) => (
                 <button
@@ -455,40 +441,9 @@ export default function App() {
                 </button>
               ))}
             </div>
-            {settings.captureMode === "camera" ? (
-              <div className="source-choice">
-                <label className="field-label" htmlFor="camera">
-                  Câmera
-                </label>
-                <select
-                  id="camera"
-                  value={settings.camera}
-                  disabled={locked || recorder.cameraLoading}
-                  onChange={(event) => {
-                    if (event.target.value)
-                      void startMode("camera", { camera: event.target.value });
-                    else update("camera", "");
-                  }}
-                >
-                  <option value="">
-                    {recorder.cameraLoading
-                      ? "Buscando câmeras…"
-                      : "Escolha uma câmera"}
-                  </option>
-                  {sources?.cameras?.map((camera) => (
-                    <option key={camera.id} value={camera.id}>
-                      {camera.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ) : sources?.wayland ? (
+            {sources?.wayland ? (
               <p className="source-mode-hint">
-                {settings.captureMode === "window"
-                  ? "Escolha uma janela no diálogo do sistema ao iniciar."
-                  : settings.captureMode === "area"
-                    ? "Escolha a tela ao iniciar. Depois, arraste para marcar a área."
-                    : "Escolha a tela no diálogo do sistema ao iniciar."}
+                Escolha o que gravar no diálogo do sistema.
               </p>
             ) : settings.captureMode === "window" ? (
               <div className="source-choice">
@@ -549,9 +504,7 @@ export default function App() {
               <h3>Dispositivos</h3>
               <span>Sua voz, nos dois lados</span>
             </div>
-            <div
-              className={`audio-grid ${settings.captureMode !== "camera" ? "has-webcam" : ""}`}
-            >
+            <div className="audio-grid has-webcam">
               <DeviceCard
                 kind="microphone"
                 enabled={settings.microphone}
@@ -574,19 +527,17 @@ export default function App() {
                 onToggle={(value) => update("systemAudio", value)}
                 onVolume={(value) => update("systemVolume", value)}
               />
-              {settings.captureMode !== "camera" && (
-                <DeviceCard
-                  kind="webcam"
-                  enabled={settings.webcamEnabled}
-                  disabled={locked}
-                  value={settings.camera}
-                  devices={sources?.cameras ?? []}
-                  loading={recorder.cameraLoading}
-                  onToggle={(value) => update("webcamEnabled", value)}
-                  onSelect={(value) => update("camera", value)}
-                  onOpen={() => void recorder.refreshCameras()}
-                />
-              )}
+              <DeviceCard
+                kind="webcam"
+                enabled={settings.webcamEnabled}
+                disabled={locked}
+                value={settings.camera}
+                devices={sources?.cameras ?? []}
+                loading={recorder.cameraLoading}
+                onToggle={(value) => update("webcamEnabled", value)}
+                onSelect={(value) => update("camera", value)}
+                onOpen={() => void recorder.refreshCameras()}
+              />
             </div>
             {sources?.warnings.map((warning) => (
               <p className="device-warning" key={warning}>

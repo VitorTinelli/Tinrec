@@ -170,6 +170,11 @@ fn snapshot_value(state: &AppState) -> Reply<Snapshot> {
 }
 fn emit(app: &tauri::AppHandle, snapshot: &Snapshot) {
     let _ = app.emit("recorder-state", snapshot);
+    if snapshot.phase != "starting"
+        && let Some(window) = app.get_webview_window("area")
+    {
+        let _ = window.hide();
+    }
     if let Some(window) = app.get_webview_window("controls") {
         if snapshot.busy() && snapshot.phase != "starting" {
             if !window.is_visible().unwrap_or(false) {
@@ -186,6 +191,24 @@ fn emit(app: &tauri::AppHandle, snapshot: &Snapshot) {
             let _ = window.hide();
         }
     }
+}
+fn portal_handles_area(linux: bool, wayland: bool, mode: &str) -> bool {
+    linux && wayland && mode == "area"
+}
+fn source_matches_monitor(
+    width: u32,
+    height: u32,
+    scale: f64,
+    source_width: u32,
+    source_height: u32,
+) -> bool {
+    let matches = |w: f64, h: f64| {
+        (w - f64::from(source_width)).abs() <= 1. && (h - f64::from(source_height)).abs() <= 1.
+    };
+    matches(f64::from(width), f64::from(height))
+        || (scale.is_finite()
+            && scale > 0.
+            && matches(f64::from(width) / scale, f64::from(height) / scale))
 }
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -405,6 +428,11 @@ fn select_area(
     let sender = session.controls.clone().ok_or("Captura encerrada")?;
     drop(session);
     position_webcam_window(&app);
+    if let Some(window) = app.get_webview_window("area") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    // Let the compositor remove the overlay before the capture clock starts.
+    std::thread::sleep(std::time::Duration::from_millis(100));
     if let Some(window) = app.get_webview_window("main") {
         window.hide().map_err(|e| e.to_string())?;
     }
@@ -458,8 +486,17 @@ async fn choose_folder(app: tauri::AppHandle, state: State<'_, Shared>) -> Reply
 async fn start_recording(
     app: tauri::AppHandle,
     state: State<'_, Shared>,
-    request: StartRequest,
+    mut request: StartRequest,
 ) -> Reply<Snapshot> {
+    if !["screen", "window", "area"].contains(&request.capture_mode.as_str()) {
+        return Err("Modo de gravação indisponível. Escolha Tela, Janela ou Área.".into());
+    }
+    if cfg!(target_os = "linux")
+        && request.capture_mode != "camera"
+        && std::env::var_os("WAYLAND_DISPLAY").is_some()
+    {
+        request.display = "auto".into();
+    }
     if ![720, 1080].contains(&request.resolution)
         || request.microphone_volume > 100
         || request.system_volume > 100
@@ -545,7 +582,17 @@ async fn start_recording(
             "camera" => request.camera,
             _ => request.display,
         },
-        capture_mode: request.capture_mode.clone(),
+        // The Wayland portal already delivers the selected region as a stream.
+        // Keep the UI intent in Session, but never run a second area selector.
+        capture_mode: if portal_handles_area(
+            cfg!(target_os = "linux"),
+            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            &request.capture_mode,
+        ) {
+            "screen".into()
+        } else {
+            request.capture_mode.clone()
+        },
         crop: None,
         webcam,
         webcam_disabled: !request.webcam_enabled,
@@ -639,11 +686,63 @@ async fn start_recording(
                 };
                 if let Ok(mut session) = state.session.lock()
                     && session.id == id
+                    && session.snapshot.phase == "starting"
+                    && !session.discard_requested
                 {
                     session.preview = Some(preview.clone());
                     drop(session);
-                    let _ = show_recorder(app.clone());
-                    let _ = app.emit_to("main", "area-selection", preview);
+                    let overlay = (|| -> Reply<()> {
+                        let window = app
+                            .get_webview_window("area")
+                            .ok_or("Seletor indisponível")?;
+                        let monitors = window.available_monitors().map_err(|e| e.to_string())?;
+                        let primary = window.primary_monitor().map_err(|e| e.to_string())?;
+                        let source_name = pinray::enumerate_sources().ok().and_then(|sources| {
+                            sources.into_iter().find_map(|source| match source {
+                                pinray::CaptureSource::Display(display)
+                                    if display.id.0 == options.display =>
+                                {
+                                    Some(display.name)
+                                }
+                                _ => None,
+                            })
+                        });
+                        let named_monitor = monitors
+                            .iter()
+                            .find(|monitor| {
+                                source_name.as_deref().is_some_and(|name| {
+                                    monitor.name().is_some_and(|value| value == name)
+                                })
+                            })
+                            .cloned();
+                        let monitor = named_monitor
+                            .or_else(|| (monitors.len() == 1).then(|| monitors[0].clone()))
+                            .or_else(|| primary.filter(|monitor| source_matches_monitor(monitor.size().width, monitor.size().height, monitor.scale_factor(), preview.source_width, preview.source_height)))
+                            .or_else(|| monitors.into_iter().find(|monitor| source_matches_monitor(monitor.size().width, monitor.size().height, monitor.scale_factor(), preview.source_width, preview.source_height)))
+                            .ok_or("Não foi possível localizar o monitor da captura para selecionar a área.")?;
+                        window
+                            .set_position(*monitor.position())
+                            .map_err(|e| e.to_string())?;
+                        window
+                            .set_size(*monitor.size())
+                            .map_err(|e| e.to_string())?;
+                        window.show().map_err(|e| e.to_string())?;
+                        window.set_focus().map_err(|e| e.to_string())?;
+                        app.emit_to("area", "area-selection", preview)
+                            .map_err(|e| e.to_string())?;
+                        Ok(())
+                    })();
+                    if let Err(error) = overlay
+                        && let Ok(mut session) = state.session.lock()
+                    {
+                        eprintln!("Não foi possível abrir a seleção de área: {error}");
+                        session.snapshot.error =
+                            Some(format!("Não foi possível abrir a seleção de área: {error}"));
+                        session.discard_requested = true;
+                        if let Some(sender) = &session.controls {
+                            let _ = sender.send(Control::Stop);
+                        }
+                    }
                 }
             };
             let webcam_callback = |frame: recording::PreviewFrame| {
@@ -721,8 +820,17 @@ async fn start_recording(
             if session.discard_requested {
                 let cloud_result = state.cloud.discard(&id);
                 let local_result = discard_files(&options.output);
-                session.snapshot.phase = "discarded".into();
-                session.snapshot.error = local_result.err().or_else(|| cloud_result.err());
+                let selection_error = session.snapshot.error.take();
+                session.snapshot.phase = if selection_error.is_some() {
+                    "failed"
+                } else {
+                    "discarded"
+                }
+                .into();
+                session.snapshot.error = local_result
+                    .err()
+                    .or_else(|| cloud_result.err())
+                    .or(selection_error);
                 session.snapshot.file_name = None;
                 session.preview = None;
             } else {
@@ -1458,6 +1566,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wayland_area_uses_portal_selection_without_a_second_crop() {
+        assert!(portal_handles_area(true, true, "area"));
+        assert!(!portal_handles_area(true, false, "area"));
+        assert!(!portal_handles_area(false, true, "area"));
+        assert!(!portal_handles_area(true, true, "window"));
+        assert!(!portal_handles_area(true, true, "camera"));
+    }
+    #[test]
+    fn capture_monitor_matching_accepts_physical_and_scaled_dimensions() {
+        assert!(source_matches_monitor(2560, 1440, 1.25, 2560, 1440));
+        assert!(source_matches_monitor(2560, 1440, 1.25, 2048, 1152));
+        assert!(source_matches_monitor(2560, 1440, 1.5, 1707, 960));
+        assert!(!source_matches_monitor(2560, 1440, 1.25, 1920, 1080));
+    }
     #[test]
     fn webcam_position_survives_restart_and_rejects_invalid_values() {
         let dir = std::env::temp_dir().join(format!("tinrec-position-{}", uuid::Uuid::new_v4()));

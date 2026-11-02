@@ -53,11 +53,6 @@ export function recordingSource(
   settings: Settings,
   sources: Sources | null,
 ): string {
-  if (settings.captureMode === "camera")
-    return (
-      sources?.cameras?.find((camera) => camera.id === settings.camera)?.name ??
-      "Câmera selecionada"
-    );
   if (settings.captureMode === "window")
     return sources?.wayland
       ? "Janela selecionada"

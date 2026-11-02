@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { call, message, type Preview, type Snapshot } from "./bridge";
+import {
+  call,
+  message,
+  type Preview,
+  idle,
+  subscribe,
+  type Snapshot,
+} from "./bridge";
 type Point = { x: number; y: number };
 export function selectedPixels(
   start: Point,
@@ -42,8 +49,11 @@ export function AreaSelector({
     [submitted, setSubmitted] = useState(false),
     [error, setError] = useState<string | null>(null);
   const dragging = useRef(false);
-  const dialog = useRef<HTMLDialogElement>(null);
+  const origin = useRef<Point | null>(null);
+
   useEffect(() => {
+    dragging.current = false;
+    origin.current = null;
     setPreview(null);
     setStart(null);
     setEnd(null);
@@ -76,9 +86,12 @@ export function AreaSelector({
   const visible =
     !!preview && snapshot.phase === "starting" && !submitted && enabled;
   useEffect(() => {
-    if (visible && !dialog.current?.open) dialog.current?.showModal();
-    else if (!visible && dialog.current?.open) dialog.current.close();
-  }, [visible]);
+    const cancel = (event: KeyboardEvent) => {
+      if (visible && event.key === "Escape" && !pending) onCancel();
+    };
+    window.addEventListener("keydown", cancel);
+    return () => window.removeEventListener("keydown", cancel);
+  }, [onCancel, pending, visible]);
   const point = (event: PointerEvent<HTMLDivElement>): Point => {
     const bounds = event.currentTarget.getBoundingClientRect();
     return {
@@ -86,71 +99,73 @@ export function AreaSelector({
       y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
     };
   };
-  const rect =
-    preview && start && end
-      ? selectedPixels(start, end, preview.sourceWidth, preview.sourceHeight)
-      : null;
-  async function confirm() {
-    if (!rect || !preview) return;
+  const submitting = useRef(false);
+  async function confirm(origin: Point, destination: Point) {
+    if (!preview || submitting.current) return;
+    const rect = selectedPixels(
+      origin,
+      destination,
+      preview.sourceWidth,
+      preview.sourceHeight,
+    );
+    if (rect.width < 2 || rect.height < 2) return;
+    submitting.current = true;
     setPending(true);
     setError(null);
     try {
-      // Close the selection dialog before the capture engine starts its clock.
+      // The native command hides the overlay before starting capture.
       setSubmitted(true);
-      await new Promise((resolve) => setTimeout(resolve, 80));
       await call("select_area", { sessionId: preview.sessionId, ...rect });
     } catch (error) {
       setSubmitted(false);
       setError(message(error));
     } finally {
+      submitting.current = false;
       setPending(false);
     }
   }
+  if (!visible) return null;
   return (
-    <dialog
-      ref={dialog}
-      className="area-dialog"
-      aria-labelledby="area-heading"
-      onCancel={(event) => {
-        event.preventDefault();
-        onCancel();
-      }}
+    <div
+      className="area-overlay"
+      role="dialog"
+      aria-label="Selecionar área de gravação"
     >
-      <h2 id="area-heading">Selecione a área para gravar</h2>
-      <p>Arraste sobre a imagem. A gravação começa depois de confirmar.</p>
       {preview ? (
         <div
           className="area-canvas"
-          style={{
-            width: `min(100%, calc((100vh - 230px) * ${preview.width / preview.height}))`,
-            margin: "0 auto",
-          }}
           onPointerDown={(event) => {
-            if (pending) return;
-            dragging.current = true;
-            event.currentTarget.setPointerCapture(event.pointerId);
+            if (pending || event.button !== 0) return;
             const value = point(event);
+            origin.current = value;
+            dragging.current = true;
             setStart(value);
             setEnd(value);
+            // Focus acquisition can make WebKit reject the first capture call.
+            // Keep the selection usable even without explicit pointer capture.
+            try {
+              event.currentTarget.setPointerCapture(event.pointerId);
+            } catch {
+              /* The monitor-sized canvas still receives the drag. */
+            }
           }}
           onPointerMove={(event) => {
             if (dragging.current) setEnd(point(event));
           }}
           onPointerUp={(event) => {
-            if (dragging.current) setEnd(point(event));
+            if (!dragging.current) return;
             dragging.current = false;
+            const destination = point(event);
+            setEnd(destination);
+            const initial = origin.current;
+            origin.current = null;
+            if (initial) void confirm(initial, destination);
           }}
           onPointerCancel={() => {
             dragging.current = false;
+            origin.current = null;
           }}
         >
-          <img
-            src={preview.image}
-            width={preview.width}
-            height={preview.height}
-            alt="Fonte selecionada para escolher a área de captura"
-            draggable={false}
-          />
           {start && end ? (
             <span
               className="area-rectangle"
@@ -169,27 +184,41 @@ export function AreaSelector({
           {error}
         </p>
       ) : null}
-      <div className="area-actions">
-        <span>
-          {rect
-            ? `${rect.width} × ${rect.height} px`
-            : "Nenhuma área selecionada"}
-        </span>
-        <button
-          className="button secondary"
-          disabled={pending}
-          onClick={onCancel}
-        >
-          Cancelar
-        </button>
-        <button
-          className="button primary"
-          disabled={pending || !rect || rect.width < 2 || rect.height < 2}
-          onClick={() => void confirm()}
-        >
-          {pending ? "Preparando…" : "Gravar área"}
-        </button>
-      </div>
-    </dialog>
+    </div>
+  );
+}
+
+export function AreaSelectionWindow() {
+  const [snapshot, setSnapshot] = useState<Snapshot>(idle);
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void subscribe((value) => {
+      if (!disposed) setSnapshot(value);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else {
+        stop = unlisten;
+        void call<Snapshot>("get_snapshot").then((value) => {
+          if (!disposed)
+            setSnapshot((current) =>
+              value.revision >= current.revision ? value : current,
+            );
+        });
+      }
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+  return (
+    <AreaSelector
+      snapshot={snapshot}
+      enabled
+      onCancel={() => {
+        void call("control_recording", { action: "discard" }).catch(() => {});
+      }}
+    />
   );
 }

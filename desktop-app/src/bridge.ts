@@ -28,7 +28,7 @@ export interface Snapshot {
   fileName: string | null;
   error: string | null;
 }
-export type CaptureMode = "screen" | "window" | "area" | "camera";
+export type CaptureMode = "screen" | "window" | "area";
 export interface Sources {
   synthetic?: boolean;
   platform: string;

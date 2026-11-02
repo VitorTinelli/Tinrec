@@ -17,6 +17,7 @@ let current: Snapshot;
 let listener: (snapshot: Snapshot) => void;
 let ready: boolean;
 let wayland: boolean;
+let platform: string;
 let startError: string | null;
 const file = {
   fileName: "Conversa - 123.mp4",
@@ -43,6 +44,7 @@ beforeEach(() => {
   current = { ...idle };
   ready = true;
   wayland = true;
+  platform = "windows";
   startError = null;
   vi.mocked(listen).mockImplementation(async (name, callback) => {
     if (name === "shortcut-action")
@@ -59,7 +61,7 @@ beforeEach(() => {
         return current;
       case "get_sources":
         return {
-          platform: "linux",
+          platform,
           wayland,
           windows: [{ id: "window-1", name: "Editor" }],
           displays: [],
@@ -110,6 +112,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("gravador desktop", () => {
+  it("no Linux mantém os três modos e envia a intenção de área ao portal", async () => {
+    platform = "linux";
+    const user = userEvent.setup();
+    render(<App />);
+    const button = await screen.findByRole("button", { name: "Área" });
+    await waitFor(() => expect(button).toHaveProperty("disabled", false));
+    for (const name of ["Tela", "Janela", "Área"])
+      expect(screen.getByRole("button", { name })).not.toBeNull();
+    await user.click(button);
+    expect(call).toHaveBeenCalledWith("start_recording", {
+      request: expect.objectContaining({
+        captureMode: "area",
+        display: "auto",
+      }),
+    });
+    expect(
+      screen.queryByRole("dialog", { name: "Selecionar área de gravação" }),
+    ).toBeNull();
+  });
+  it("mantém três modos no macOS", async () => {
+    platform = "macos";
+    wayland = false;
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
+    );
+    for (const name of ["Tela", "Janela", "Área"])
+      expect(screen.getByRole("button", { name })).not.toBeNull();
+  });
   it("inclui a webcam selecionada na gravação de tela", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -279,32 +313,32 @@ describe("gravador desktop", () => {
       screen.getByRole("heading", { name: "Configurações" }),
     ).not.toBeNull();
   });
-  it("oferece os quatro modos e envia a câmera escolhida sem trocar para tela", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
-        "disabled",
-        false,
-      ),
-    );
-    for (const name of ["Tela", "Janela", "Área", "Somente câmera"])
-      expect(screen.getByRole("button", { name })).not.toBeNull();
-    await user.click(screen.getByRole("button", { name: "Somente câmera" }));
-    await screen.findByRole("option", { name: "USB Camera" });
-    expect(
-      vi.mocked(call).mock.calls.filter(([name]) => name === "start_recording"),
-    ).toHaveLength(0);
-    await user.selectOptions(screen.getByLabelText("Câmera"), "camera-0");
-
-    expect(call).toHaveBeenCalledWith("start_recording", {
-      request: expect.objectContaining({
-        captureMode: "camera",
-        camera: "camera-0",
-        title: expect.stringContaining("Câmera"),
-      }),
-    });
-  });
+  it.each(["linux", "windows", "macos"])(
+    "remove Somente câmera e migra a preferência antiga em %s",
+    async (os) => {
+      platform = os;
+      localStorage.setItem(
+        "tinrec.recorder.v2",
+        JSON.stringify({ captureMode: "camera" }),
+      );
+      render(<App />);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
+          "disabled",
+          false,
+        ),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Somente câmera" }),
+      ).toBeNull();
+      expect(
+        screen.getByRole("button", { name: "Selecionar webcam" }),
+      ).not.toBeNull();
+      expect(
+        JSON.parse(localStorage.getItem("tinrec.recorder.v2")!).captureMode,
+      ).toBe("screen");
+    },
+  );
   it("inicia ao escolher a janela quando ainda não existe uma fonte definida", async () => {
     wayland = false;
     const user = userEvent.setup();

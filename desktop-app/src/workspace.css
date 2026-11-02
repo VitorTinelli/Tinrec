@@ -880,60 +880,17 @@ select {
   line-height: 1.7;
   margin-top: 13px;
 }
-.area-dialog {
-  width: min(920px, 94vw);
-  max-height: 94vh;
-  overflow: auto;
-  border: 1px solid #e0e6ef;
-  border-radius: 14px;
-  padding: 22px;
-  color: #344158;
-  background: #fff;
-  box-shadow: 0 20px 80px #0004;
+html.area-window, .area-window body, .area-window #root {
+  background: transparent !important;
+  width: 100%; height: 100%; min-width: 0; margin: 0; overflow: hidden;
 }
-.area-dialog::backdrop {
-  background: #101827bb;
-}
-.area-dialog h2 {
-  font-size: 17px;
-}
-.area-dialog > p {
-  font-size: 11px;
-  color: #8a96aa;
-  margin: 8px 0 16px;
-}
-.area-canvas {
-  position: relative;
-  cursor: crosshair;
-  touch-action: none;
-  overflow: hidden;
-  background: #172031;
-  border-radius: 7px;
-}
-.area-canvas img {
-  display: block;
-  width: 100%;
-  height: auto;
-  pointer-events: none;
-}
+.area-overlay, .area-canvas { position: fixed; inset: 0; }
+.area-canvas { cursor: crosshair; touch-action: none; overflow: hidden; }
 .area-rectangle {
-  position: absolute;
-  border: 2px solid #6588f4;
-  background: #6486ed22;
-  box-shadow: 0 0 0 10000px #11182777;
-  pointer-events: none;
+  position: absolute; border: 2px solid #6588f4;
+  box-shadow: 0 0 0 10000px #11182777; pointer-events: none;
 }
-.area-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 18px;
-}
-.area-actions > span {
-  margin-right: auto;
-  font-size: 11px;
-  color: #8a96aa;
-}
+.area-overlay .name-error { position: fixed; top: 20px; left: 20px; background: white; padding: 12px; }
 .app-shell .recorder-layout {
   grid-template-columns: minmax(0, 1fr);
   max-width: 720px;
@@ -998,3 +955,7 @@ select {
 }
 
 .view-recorder .audio-grid.has-webcam{grid-template-columns:repeat(3,minmax(0,1fr))}.device-card{position:relative;min-width:0;cursor:pointer}.device-card-trigger{display:flex;align-items:center;gap:6px;flex:1;min-width:0;border:0;background:none;padding:0;color:#677086;font-size:10px;font-weight:600;text-align:left}.device-card-trigger>span:nth-child(2){flex:1}.device-card-name{display:block;width:100%;margin-top:8px;padding:0;border:0;background:none;text-align:left;font-size:9px;color:#919bb0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.device-picker{position:absolute;z-index:20;top:calc(100% + 6px);left:0;width:max-content;min-width:100%;max-width:min(340px,70vw);max-height:240px;overflow:auto;padding:5px;background:white;border:1px solid #e1e5ef;border-radius:10px;box-shadow:0 8px 28px #26365e20;cursor:default}.device-card:last-child .device-picker{left:auto;right:0}.device-picker button{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:9px;border:0;background:none;border-radius:6px;text-align:left;font-size:11px;color:#59647b}.device-picker button:hover{background:#f0f3ff}.device-picker button span{overflow-wrap:anywhere}.device-picker-empty{display:block;padding:9px;font-size:11px;color:#919bb0}.device-card .volume-row{margin-top:8px}@media(max-width:760px){.view-recorder .audio-grid.has-webcam{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.view-recorder .capture-modes{grid-template-columns:repeat(3,minmax(0,1fr))}
+
+.audio-grid .audio-heading{min-height:20px}.audio-grid .device-card-name{height:14px;line-height:14px;margin-top:8px}.audio-grid .volume-row{margin-top:8px}

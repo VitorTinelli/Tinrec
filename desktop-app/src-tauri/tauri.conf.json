@@ -23,7 +23,7 @@
       },
       {
         "label": "controls",
-        "title": "Tinrec · controles",
+        "title": "Tinrec \u00b7 controles",
         "url": "index.html?window=controls",
         "width": 536,
         "height": 56,
@@ -38,10 +38,26 @@
       },
       {
         "label": "webcam",
-        "title": "Tinrec · webcam",
+        "title": "Tinrec \u00b7 webcam",
         "url": "index.html?window=webcam",
         "width": 216,
         "height": 216,
+        "resizable": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "contentProtected": true,
+        "transparent": true,
+        "shadow": false,
+        "backgroundColor": "#00000000"
+      },
+      {
+        "label": "area",
+        "title": "Tinrec \u00b7 selecionar \u00e1rea",
+        "url": "index.html?window=area",
+        "width": 800,
+        "height": 600,
         "resizable": false,
         "decorations": false,
         "alwaysOnTop": true,
@@ -62,7 +78,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "shortDescription": "Gravador local de tela e áudio",
+    "shortDescription": "Gravador local de tela e \u00e1udio",
     "category": "Video",
     "macOS": {
       "minimumSystemVersion": "13.0",

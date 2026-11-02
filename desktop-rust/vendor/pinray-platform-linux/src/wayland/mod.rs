@@ -93,7 +93,11 @@ impl WaylandVideoBackend {
         let portal = PortalClient::new()?;
         let cast = portal.start_screen_cast(
             matches!(config.cursor_mode, CursorMode::Embedded),
-            if matches!(config.video_target, Some(pinray_core::VideoCaptureTarget::Window(_))) { 2 } else { 1 },
+            match &config.video_target {
+                Some(pinray_core::VideoCaptureTarget::Window(_)) => 2,
+                Some(pinray_core::VideoCaptureTarget::Display(id)) if id.0 != "auto" => 1,
+                _ => 3,
+            },
             config.restore_token.as_deref(),
         )?;
         let (fd, streams, restore_token) = cast.into_parts();

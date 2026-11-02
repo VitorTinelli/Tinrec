@@ -1,3 +1,4 @@
+import { AreaSelectionWindow } from "./AreaSelector";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
@@ -43,12 +44,22 @@ document.addEventListener("keydown", (event) => {
 });
 
 const surface = new URLSearchParams(location.search).get("window");
+const area = surface === "area";
+if (area) document.documentElement.classList.add("area-window");
 const floating = surface === "controls";
 const webcam = surface === "webcam";
 if (webcam) document.documentElement.classList.add("webcam-window");
 if (floating) document.documentElement.classList.add("controls-window");
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {webcam ? <WebcamOverlay /> : floating ? <FloatingRecorder /> : <App />}
+    {area ? (
+      <AreaSelectionWindow />
+    ) : webcam ? (
+      <WebcamOverlay />
+    ) : floating ? (
+      <FloatingRecorder />
+    ) : (
+      <App />
+    )}
   </StrictMode>,
 );

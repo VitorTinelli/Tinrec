@@ -43,9 +43,7 @@ function loadSettings(): Settings {
     );
     return {
       ...defaults,
-      captureMode: ["screen", "window", "area", "camera"].includes(
-        data.captureMode ?? "",
-      )
+      captureMode: ["screen", "window", "area"].includes(data.captureMode ?? "")
         ? data.captureMode!
         : "screen",
       window: typeof data.window === "string" ? data.window : "",
@@ -102,9 +100,8 @@ export function useRecorder() {
     }
   }, []);
   useEffect(() => {
-    if (settings.captureMode === "camera" || settings.webcamEnabled)
-      void refreshCameras();
-  }, [settings.captureMode, settings.webcamEnabled, refreshCameras]);
+    if (settings.webcamEnabled) void refreshCameras();
+  }, [settings.webcamEnabled, refreshCameras]);
   const accept = useCallback((next: Snapshot) => {
     if (mounted.current)
       setSnapshot((previous) =>
@@ -213,16 +210,14 @@ export function useRecorder() {
           ...overrides,
           captureMode: mode ?? settings.captureMode,
         };
+        if (sources?.wayland) request.display = "auto";
         if (
           request.captureMode === "window" &&
           !sources?.wayland &&
           !request.window
         )
           throw new Error("Escolha uma janela para gravar.");
-        if (
-          (request.captureMode === "camera" || request.webcamEnabled) &&
-          !request.camera
-        )
+        if (request.webcamEnabled && !request.camera)
           throw new Error("Escolha uma câmera para gravar.");
         const title = resolveRecordingName(
           request.title,
