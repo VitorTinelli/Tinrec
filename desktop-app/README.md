@@ -26,7 +26,7 @@ essas dependências já estão disponíveis.
 
 ## Webcam sobre a gravação
 
-No Gravador, ative **Webcam**, selecione o dispositivo e clique em Tela, Janela ou Área. A webcam aparece em um círculo flutuante enquanto grava. Arraste o círculo para mudar de lugar; a posição é guardada no aplicativo e reutilizada nas próximas gravações. O botão de câmera do mini menu liga ou desliga a webcam durante a gravação, inclusive se ela estava desligada ao iniciar (usa a câmera selecionada ou a primeira disponível). Desligar libera o dispositivo. A câmera também é encerrada ao parar ou descartar. No modo Área, a posição inicial respeita o recorte. O modo Somente câmera continua disponível separadamente.
+No Gravador, ative **Webcam**, selecione o dispositivo e clique em Tela, Janela ou Área. A webcam aparece em um círculo flutuante enquanto grava. Arraste o círculo para mudar de lugar; a posição é guardada no aplicativo e reutilizada nas próximas gravações. O botão de câmera do mini menu liga ou desliga a webcam durante a gravação, inclusive se ela estava desligada ao iniciar (usa a câmera selecionada ou a primeira disponível). Desligar libera o dispositivo. A câmera também é encerrada ao parar ou descartar. No modo Área, a posição inicial respeita o recorte. A webcam é usada somente como sobreposição.
 
 No macOS, autorize o acesso à câmera quando solicitado; no Windows, habilite o acesso à câmera para aplicativos da área de trabalho. No Linux, o dispositivo V4L2 precisa estar acessível ao usuário. Em sessões Wayland com XWayland disponível, a interface usa X11 para permitir arraste e restauração da posição; a captura continua pelo portal Wayland. A interface desativa o renderizador DMA-BUF do WebKit por padrão para evitar falha de alocação GBM e janela em branco. Isso não altera a captura PipeWire nem o encoder FFmpeg. Escolhas explícitas de GDK_BACKEND e WEBKIT_DISABLE_DMABUF_RENDERER são respeitadas. Em Wayland puro, posicionamento absoluto depende do compositor. Na captura de tela/área no Linux, a janela da webcam entra pela própria captura, evitando duplicação; em captura de janela e nos demais sistemas, a composição é feita pelo motor. Os testes automatizados usam imagens geradas; qualidade, latência e permissões precisam de validação com a câmera real em cada sistema.
 
@@ -315,13 +315,12 @@ locais e não precisam de registro global.
 
 ## Modos de captura
 
-O gravador oferece **Tela**, **Janela**, **Área** e **Somente câmera**.
+O gravador oferece **Tela**, **Janela** e **Área**.
 No Wayland, Tela e Área abrem o seletor de monitores do sistema; Janela abre o
 seletor restrito a janelas. Nos outros sistemas, escolha o monitor ou janela na
 lista. Não há substituição silenciosa de uma janela por um monitor inteiro.
 
-Em Área, selecione a fonte e arraste sobre a imagem estática apresentada pelo
-Tinrec. Confirme **Gravar área** para iniciar. O tempo de seleção fica fora da
+Em Área, selecione a fonte e arraste diretamente sobre o monitor, usando a camada transparente de seleção. Ao soltar o mouse depois de marcar uma região válida, a gravação começa automaticamente, sem confirmação. O tempo de seleção fica fora da
 gravação e só o recorte é codificado. Cancelar descarta a sessão ainda não iniciada.
 A imagem de seleção permanece somente em memória; não é enviada ao site.
 O gravador é ocultado antes de obter essa imagem e ao confirmar o recorte, para
@@ -347,8 +346,14 @@ perceptiva ainda devem ser conferidas no dispositivo em cada sistema operacional
 A janela principal inicia em 820 × 700, com mínimo de 700 × 560. O gravador tem
 uma única coluna; durante a captura, uma faixa compacta mantém o estado e os
 controles acessíveis, além do mini menu flutuante. Não há um botão separado de
-início: os quatro cartões iniciam o fluxo de captura.
+início: os três cartões iniciam o fluxo de captura.
 
 ## Instalador Windows com ferramentas incluídas
 
 Execute o workflow manual **Windows installer** no GitHub Actions. O artefato `Tinrec-Windows-x64-installer` contém `Tinrec-Windows-x64-setup.exe` e o checksum SHA-256. O instalador NSIS inclui FFmpeg, ffprobe e seus avisos de licença; instala para o usuário atual e baixa o WebView2 caso necessário. Requer internet para instalar WebView2 se ele ainda não estiver presente. O pacote é x64 e ainda não possui assinatura digital.
+
+## Modos por sistema
+
+No Linux, o gravador mantém **Tela**, **Janela** e **Área**, com seus respectivos atalhos. Em Wayland, a fonte final é escolhida no portal do compositor; no modo Área, o Tinrec usa diretamente o stream recebido, sem abrir outro recorte. As escolhas oferecidas dependem do compositor, e o portal não é tratado como se identificasse automaticamente uma região versus um monitor. Em X11, a seleção e o recorte do aplicativo continuam disponíveis.
+
+Windows e macOS mantêm Tela, Janela e Área. O backend macOS Pinray 0.2.7 usa SCContentFilter com tela/janela selecionadas por ID, sem SCContentSharingPicker; por isso, Área continua usando o recorte do Tinrec. Essa decisão foi conferida no código do backend e na documentação da Apple, sem executar macOS neste ambiente.
