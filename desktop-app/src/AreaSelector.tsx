@@ -8,6 +8,7 @@ import {
   subscribe,
   type Snapshot,
 } from "./bridge";
+import { PrintOverlay } from "./screenshots/PrintOverlay";
 type Point = { x: number; y: number };
 export function selectedPixels(
   start: Point,
@@ -37,10 +38,14 @@ export function AreaSelector({
   snapshot,
   enabled,
   onCancel,
+  selectionCommand = "select_area",
+  onSelected,
 }: {
   snapshot: Snapshot;
   enabled: boolean;
   onCancel: () => void;
+  selectionCommand?: string;
+  onSelected?: () => void;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [start, setStart] = useState<Point | null>(null),
@@ -73,7 +78,11 @@ export function AreaSelector({
           return;
         }
         unlisten = stop;
-        void call<Preview | null>("get_preview")
+        void call<Preview | null>(
+          selectionCommand === "select_print_area"
+            ? "get_print_area"
+            : "get_preview",
+        )
           .then(accept)
           .catch(() => {});
       })
@@ -82,7 +91,7 @@ export function AreaSelector({
       disposed = true;
       unlisten?.();
     };
-  }, [enabled, snapshot.sessionId, snapshot.phase]);
+  }, [enabled, snapshot.sessionId, snapshot.phase, selectionCommand]);
   const visible =
     !!preview && snapshot.phase === "starting" && !submitted && enabled;
   useEffect(() => {
@@ -115,7 +124,8 @@ export function AreaSelector({
     try {
       // The native command hides the overlay before starting capture.
       setSubmitted(true);
-      await call("select_area", { sessionId: preview.sessionId, ...rect });
+      await call(selectionCommand, { sessionId: preview.sessionId, ...rect });
+      onSelected?.();
     } catch (error) {
       setSubmitted(false);
       setError(message(error));
@@ -125,6 +135,18 @@ export function AreaSelector({
     }
   }
   if (!visible) return null;
+  if (selectionCommand === "select_print_area" && preview) {
+    return (
+      <PrintOverlay
+        preview={preview}
+        onCancel={onCancel}
+        onDone={() => {
+          setSubmitted(true);
+          onSelected?.();
+        }}
+      />
+    );
+  }
   return (
     <div
       className="area-overlay"
@@ -134,6 +156,14 @@ export function AreaSelector({
       {preview ? (
         <div
           className="area-canvas"
+          style={
+            selectionCommand === "select_print_area" && preview?.image
+              ? {
+                  backgroundImage: `url(${preview.image})`,
+                  backgroundSize: "100% 100%",
+                }
+              : undefined
+          }
           onPointerDown={(event) => {
             if (pending || event.button !== 0) return;
             const value = point(event);
@@ -189,6 +219,26 @@ export function AreaSelector({
 }
 
 export function AreaSelectionWindow() {
+  const [printArea, setPrintArea] = useState<Preview | null>(null);
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen<Preview>("print-area-selection", (event) => {
+      if (!disposed) setPrintArea(event.payload);
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else {
+        stop = unlisten;
+        void call<Preview | null>("get_print_area").then((value) => {
+          if (!disposed && value) setPrintArea(value);
+        });
+      }
+    });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
   const [snapshot, setSnapshot] = useState<Snapshot>(idle);
   useEffect(() => {
     let disposed = false;
@@ -214,10 +264,23 @@ export function AreaSelectionWindow() {
   }, []);
   return (
     <AreaSelector
-      snapshot={snapshot}
+      key={printArea?.sessionId ?? snapshot.sessionId}
+      snapshot={
+        printArea
+          ? { ...idle, phase: "starting", sessionId: printArea.sessionId }
+          : snapshot
+      }
+      selectionCommand={printArea ? "select_print_area" : "select_area"}
+      onSelected={() => {
+        if (printArea) setPrintArea(null);
+      }}
       enabled
       onCancel={() => {
-        void call("control_recording", { action: "discard" }).catch(() => {});
+        if (printArea) {
+          setPrintArea(null);
+          void call("close_print").catch(() => {});
+        } else
+          void call("control_recording", { action: "discard" }).catch(() => {});
       }}
     />
   );

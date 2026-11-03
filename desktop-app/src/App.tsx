@@ -1,3 +1,4 @@
+import { ScreenshotPanel } from "./screenshots/ScreenshotPanel";
 import { DeviceCard } from "./DeviceCard";
 import { ShortcutsPanel } from "./ShortcutsPanel";
 import { listen } from "@tauri-apps/api/event";
@@ -27,6 +28,7 @@ import {
   Settings2,
   AppWindow,
   Scan,
+  Image,
 } from "lucide-react";
 import { duration, type Phase, type CaptureMode } from "./bridge";
 import { AudioMuteButtons, DiscardControl } from "./RecordingControls";
@@ -106,11 +108,19 @@ function AudioControl({
 
 export default function App() {
   const recorder = useRecorder();
+  const [printMode, setPrintMode] = useState(false);
+  const [printBusy, setPrintBusy] = useState(false);
+  const printBusyRef = useRef(false);
+  printBusyRef.current = printBusy;
+  const [printShortcut, setPrintShortcut] = useState(0);
+  const [printShortcutMode, setPrintShortcutMode] = useState<
+    "screen" | "window" | "area"
+  >("area");
   const mainRef = useRef<HTMLElement>(null);
   const [variablesOpen, setVariablesOpen] = useState(false);
-  const [view, setView] = useState<"recorder" | "library" | "settings">(
-    "recorder",
-  );
+  const [view, setView] = useState<
+    "recorder" | "library" | "prints" | "settings"
+  >("recorder");
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0;
   }, [view]);
@@ -133,7 +143,24 @@ export default function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<string>("shortcut-action", (event) => {
-      if (disposed) return;
+      if (disposed || printBusyRef.current) return;
+      if (
+        ["screenshot", "screenshot-screen", "screenshot-window"].includes(
+          event.payload,
+        )
+      ) {
+        setPrintShortcutMode(
+          event.payload === "screenshot-screen"
+            ? "screen"
+            : event.payload === "screenshot-window"
+              ? "window"
+              : "area",
+        );
+        setView("recorder");
+        setPrintMode(true);
+        setPrintShortcut((value) => value + 1);
+        return;
+      }
       setView(
         event.payload === "library"
           ? "library"
@@ -223,7 +250,13 @@ export default function App() {
     >
       <header className="topbar">
         <div className="brand">
-          <img className="brand-symbol" src="/tinrec-icon.svg" alt="" width="36" height="36" />
+          <img
+            className="brand-symbol"
+            src="/tinrec-icon.svg"
+            alt=""
+            width="36"
+            height="36"
+          />
           <span>
             Tinrec<span className="brand-dot">.</span>
           </span>
@@ -232,6 +265,7 @@ export default function App() {
       <nav className="workspace-nav" aria-label="Espaço de trabalho">
         <span className="workspace-caption">ESPAÇO PESSOAL</span>
         <button
+          disabled={printBusy}
           className={view === "recorder" ? "selected" : ""}
           aria-current={view === "recorder" ? "page" : undefined}
           onClick={() => setView("recorder")}
@@ -240,14 +274,25 @@ export default function App() {
           Gravador{active ? <i className="nav-recording-dot" /> : null}
         </button>
         <button
+          disabled={printBusy}
           className={view === "library" ? "selected" : ""}
           aria-current={view === "library" ? "page" : undefined}
           onClick={() => setView("library")}
         >
           <Library size={17} />
-          Meus vídeos<span>{files.length}</span>
+          Biblioteca
         </button>
         <button
+          disabled={printBusy}
+          className={view === "prints" ? "selected" : ""}
+          aria-current={view === "prints" ? "page" : undefined}
+          onClick={() => setView("prints")}
+        >
+          <Image size={17} />
+          Prints
+        </button>
+        <button
+          disabled={printBusy}
           className={view === "settings" ? "selected" : ""}
           aria-current={view === "settings" ? "page" : undefined}
           onClick={() => setView("settings")}
@@ -273,15 +318,19 @@ export default function App() {
               {view === "recorder"
                 ? "Vamos criar algo?"
                 : view === "library"
-                  ? "Meus vídeos"
-                  : "Configurações"}
+                  ? "Biblioteca"
+                  : view === "prints"
+                    ? "Prints"
+                    : "Configurações"}
             </h1>
             <p>
               {view === "recorder"
                 ? "Uma tela, uma ideia. Aperte gravar."
                 : view === "library"
                   ? "Suas ideias ganham um lugar aqui."
-                  : "Personalize sua gravação e conecte sua conta."}
+                  : view === "prints"
+                    ? "Capture, anote e compartilhe."
+                    : "Personalize sua gravação e conecte sua conta."}
             </p>
           </div>
           <button
@@ -307,7 +356,7 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        {tools && !tools.ready ? (
+        {tools && !tools.ready && view === "recorder" && !printMode ? (
           <div className="notice" role="alert">
             <Settings2 size={19} />
             <div>
@@ -323,7 +372,59 @@ export default function App() {
             </div>
           </div>
         ) : null}
-        <div className="recorder-layout" hidden={view !== "recorder"}>
+        {view === "recorder" && (
+          <div
+            className="capture-kind"
+            role="group"
+            aria-label="Tipo de captura"
+          >
+            <button
+              aria-pressed={!printMode}
+              disabled={active || printBusy}
+              onClick={() => setPrintMode(false)}
+            >
+              Vídeo
+            </button>
+            <button
+              aria-pressed={printMode}
+              disabled={active || printBusy}
+              onClick={() => setPrintMode(true)}
+            >
+              Print
+            </button>
+          </div>
+        )}
+        {view === "recorder" && printMode && (
+          <ScreenshotPanel
+            sources={sources}
+            display={settings.display}
+            windowId={settings.window}
+            disabled={active || loading}
+            onWindow={(value) => update("window", value)}
+            onDisplay={(value) => update("display", value)}
+            shortcut={printShortcut}
+            shortcutMode={printShortcutMode}
+            captureOnly
+            onBusyChange={setPrintBusy}
+          />
+        )}
+        {view === "prints" && (
+          <ScreenshotPanel
+            sources={sources}
+            display={settings.display}
+            windowId={settings.window}
+            disabled={active || loading}
+            onWindow={(value) => update("window", value)}
+            onDisplay={(value) => update("display", value)}
+            shortcut={0}
+            libraryOnly
+            onBusyChange={setPrintBusy}
+          />
+        )}
+        <div
+          className="recorder-layout"
+          hidden={view !== "recorder" || printMode}
+        >
           <section
             className="panel configuration"
             aria-labelledby="capture-heading"
@@ -638,7 +739,7 @@ export default function App() {
               </select>
             </div>
             <label className="save-local-option">
-              <span>Manter uma cópia no computador</span>
+              <span>Salvar vídeos no computador</span>
               <input
                 className="toggle"
                 type="checkbox"
@@ -647,12 +748,28 @@ export default function App() {
                 onChange={(e) => update("keepLocal", e.target.checked)}
               />
             </label>
+            <p className="storage-path">
+              {folder ? `${folder}/Videos` : "Carregando pasta…"}
+            </p>
+            <label className="save-local-option">
+              <span>Salvar prints no computador</span>
+              <input
+                className="toggle"
+                type="checkbox"
+                checked={settings.keepPrintLocal !== false}
+                disabled={locked}
+                onChange={(e) => update("keepPrintLocal", e.target.checked)}
+              />
+            </label>
+            <p className="storage-path">
+              {folder ? `${folder}/Prints` : "Carregando pasta…"}
+            </p>
             <div className="destination">
-              <span>SEUS VÍDEOS FICAM AQUI</span>
+              <span>PASTA DO TINREC</span>
               <button
                 title={folder || "Pasta de gravações"}
                 onClick={() => void recorder.chooseFolder()}
-                disabled={locked || loading || !settings.keepLocal}
+                disabled={locked || loading}
               >
                 <FolderOpen size={16} />
                 <span>{folder || "Carregando pasta…"}</span>

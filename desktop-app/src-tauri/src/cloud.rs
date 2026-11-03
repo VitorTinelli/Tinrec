@@ -295,6 +295,7 @@ impl Cloud {
         {
             return Ok(());
         }
+        let image = path.extension().is_some_and(|extension| extension == "png");
         i.saved.jobs.push(Job {
             id,
             file_name: path
@@ -311,7 +312,7 @@ impl Cloud {
             uploaded_bytes: 0,
             size_bytes: 0,
             url: None,
-            temporary_done: false,
+            temporary_done: image,
             temporary_bytes: 0,
             temporary_note: None,
             error: None,
@@ -501,7 +502,10 @@ impl Cloud {
                 .parent()
                 .ok_or("Pasta de dados indisponível")?
                 .join("pending-recordings");
-            if j.path.parent() != Some(pending.as_path()) {
+            let pending_prints = pending.with_file_name("pending-prints");
+            if j.path.parent() != Some(pending.as_path())
+                && j.path.parent() != Some(pending_prints.as_path())
+            {
                 return Err("Limpeza restrita à pasta temporária do Tinrec.".into());
             }
             crate::discard_files(&j.path)?;
@@ -531,7 +535,7 @@ impl Cloud {
             let v = self.api(
                 "/recordings",
                 Some(a),
-                Some(json!({"id":j.id,"title":j.title,"resolution":j.resolution})),
+                Some(json!({"id":j.id,"title":j.title,"resolution":j.resolution,"mediaType":if j.path.extension().is_some_and(|extension|extension=="png"){"image"}else{"video"}})),
             )?;
             let url = field(&v, "url")?;
             if !url.starts_with(&format!("{SITE}/v/")) {
@@ -666,7 +670,17 @@ impl Cloud {
         let r = self
             .client
             .put(&uri)
-            .header(CONTENT_TYPE, "video/mp4")
+            .header(
+                CONTENT_TYPE,
+                if j.path
+                    .extension()
+                    .is_some_and(|extension| extension == "png")
+                {
+                    "image/png"
+                } else {
+                    "video/mp4"
+                },
+            )
             .header(
                 CONTENT_RANGE,
                 format!("bytes {}-{}/{}", offset, end - 1, j.size_bytes),
@@ -901,6 +915,31 @@ mod tests {
         i.saved.account = Some(account.into());
     }
     #[test]
+    fn temporary_print_is_removed_only_after_upload_and_local_print_is_protected() {
+        let (c, dir) = test_cloud();
+        authenticate(&c, "first");
+        let pending = dir.join("pending-prints");
+        fs::create_dir_all(&pending).unwrap();
+        let path = pending.join("test.png");
+        fs::write(&path, b"png").unwrap();
+        c.enqueue("print".into(), path.clone(), "test".into(), 1080, 0., false)
+            .unwrap();
+        c.remove_local_after_upload("print").unwrap();
+        let auth = c.inner.lock().unwrap().auth.clone().unwrap();
+        let mut job = c.inner.lock().unwrap().saved.jobs[0].clone();
+        assert!(path.exists());
+        job.status = "uploaded".into();
+        c.step(&auth, &mut job).unwrap();
+        assert!(!path.exists());
+        let local = dir.join("local.png");
+        fs::write(&local, b"png").unwrap();
+        job.path = local.clone();
+        job.remove_local_after_upload = true;
+        assert!(c.step(&auth, &mut job).is_err());
+        assert!(local.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn temporary_local_copy_is_preserved_until_confirmed_and_policy_survives_restart() {
         let (c, dir) = test_cloud();
         authenticate(&c, "first");
@@ -970,6 +1009,29 @@ mod tests {
         assert!(c.recording_url(&first).is_err());
         c.inner.lock().unwrap().auth = None;
         assert!(c.recording_url(&first).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn edited_png_queue_skips_video_processing_after_restart() {
+        let (cloud, dir) = test_cloud();
+        authenticate(&cloud, "owner");
+        let path = dir.join("edited.png");
+        fs::write(&path, b"edited-png").unwrap();
+        cloud
+            .enqueue(
+                "print".into(),
+                path.clone(),
+                "Print editado".into(),
+                1080,
+                0.,
+                false,
+            )
+            .unwrap();
+        let saved: Saved = serde_json::from_slice(&fs::read(&cloud.file).unwrap()).unwrap();
+        assert!(saved.jobs[0].temporary_done);
+        assert_eq!(saved.jobs[0].path, path);
+        assert_eq!(saved.jobs[0].status, "queued");
+        assert_eq!(saved.jobs[0].duration_ms, 0);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

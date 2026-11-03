@@ -44,8 +44,9 @@ document.addEventListener("keydown", (event) => {
 });
 
 const surface = new URLSearchParams(location.search).get("window");
-const area = surface === "area";
-if (area) document.documentElement.classList.add("area-window");
+const printArea = surface === "print-area";
+const area = surface === "area" || printArea;
+if (area) document.documentElement.classList.add(printArea ? "print-window" : "area-window");
 const floating = surface === "controls";
 const webcam = surface === "webcam";
 if (webcam) document.documentElement.classList.add("webcam-window");

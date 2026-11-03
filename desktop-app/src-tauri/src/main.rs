@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cloud;
+mod screenshots;
 mod shortcuts;
 mod tray;
 use base64::Engine;
@@ -491,10 +492,7 @@ async fn start_recording(
     if !["screen", "window", "area"].contains(&request.capture_mode.as_str()) {
         return Err("Modo de gravação indisponível. Escolha Tela, Janela ou Área.".into());
     }
-    if cfg!(target_os = "linux")
-        && request.capture_mode != "camera"
-        && std::env::var_os("WAYLAND_DISPLAY").is_some()
-    {
+    if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
         request.display = "auto".into();
     }
     if ![720, 1080].contains(&request.resolution)
@@ -524,6 +522,14 @@ async fn start_recording(
         return Err("Informe um nome de vídeo válido em Configurações antes de gravar.".into());
     }
     let mut session = lock(&state.session)?;
+    if app
+        .state::<screenshots::Prints>()
+        .busy
+        .load(Ordering::Acquire)
+    {
+        return Err("Finalize o print aberto antes de gravar.".into());
+    }
+
     if state.exiting.load(Ordering::Acquire) {
         return Err("O Tinrec está sendo encerrado.".into());
     }
@@ -534,7 +540,7 @@ async fn start_recording(
         return Err("Conecte sua conta Google ou ative a cópia local em Configurações.".into());
     }
     let folder = if request.keep_local {
-        lock(&state.folder)?.clone()
+        lock(&state.folder)?.join("Videos")
     } else {
         state
             .config
@@ -580,10 +586,8 @@ async fn start_recording(
                 }
             }
             "camera" => request.camera,
-            _ => request.display,
+            _ => request.display.clone(),
         },
-        // The Wayland portal already delivers the selected region as a stream.
-        // Keep the UI intent in Session, but never run a second area selector.
         capture_mode: if portal_handles_area(
             cfg!(target_os = "linux"),
             std::env::var_os("WAYLAND_DISPLAY").is_some(),
@@ -646,10 +650,8 @@ async fn start_recording(
     position_webcam_window(&app);
     emit(&app, &initial);
     let state = state.inner().clone();
-    if options.capture_mode == "area"
-        && let Some(window) = app.get_webview_window("main")
-    {
-        let _ = window.hide();
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.minimize();
     }
     tauri::async_runtime::spawn_blocking(move || {
         let tools = check_tools(&app);
@@ -857,7 +859,7 @@ async fn start_recording(
             let snapshot = session.snapshot.clone();
             let close = session.exit_requested;
             drop(session);
-            if options.capture_mode == "area" && snapshot.phase != "completed" && !close {
+            if snapshot.phase != "completed" && !close {
                 let _ = show_recorder(app.clone());
             }
             emit(&app, &snapshot);
@@ -1123,9 +1125,13 @@ fn recording_path(state: &AppState, file_name: &str) -> Reply<PathBuf> {
         return Err("Arquivo de gravação inválido.".into());
     }
     let folder = fs::canonicalize(&*lock(&state.folder)?).map_err(|e| e.to_string())?;
-    let path = fs::canonicalize(folder.join(file_name))
+    let videos = folder.join("Videos");
+    let path = fs::canonicalize(videos.join(file_name))
+        .or_else(|_| fs::canonicalize(folder.join(file_name)))
         .map_err(|_| "A gravação não está mais nessa pasta.".to_string())?;
-    if path.parent() != Some(folder.as_path()) || !path.is_file() {
+    if (path.parent() != Some(folder.as_path()) && path.parent() != Some(videos.as_path()))
+        || !path.is_file()
+    {
         return Err("O arquivo não pertence à pasta de gravações.".into());
     }
     Ok(path)
@@ -1204,7 +1210,10 @@ async fn list_recordings(state: State<'_, Shared>) -> Reply<Vec<RecordingFile>> 
             return Ok(Vec::new());
         }
         let mut files = Vec::new();
-        for entry in fs::read_dir(folder).map_err(|e| e.to_string())? {
+        let entries = fs::read_dir(&folder)
+            .map_err(|e| e.to_string())?
+            .chain(fs::read_dir(folder.join("Videos")).into_iter().flatten());
+        for entry in entries {
             let entry = entry.map_err(|e| e.to_string())?;
             let file_name = entry.file_name().to_string_lossy().to_string();
             if !file_name.ends_with(".mp4")
@@ -1357,6 +1366,14 @@ fn hide_to_tray(app: tauri::AppHandle) -> Reply<()> {
 }
 
 fn request_exit(app: &tauri::AppHandle) -> Reply<()> {
+    if app
+        .state::<screenshots::Prints>()
+        .busy
+        .load(Ordering::Acquire)
+    {
+        let _ = show_recorder(app.clone());
+        return Err("Feche o editor ou cancele a captura do print antes de sair.".into());
+    }
     let state = app.state::<Shared>();
     let mut session = lock(&state.session)?;
     if session.snapshot.busy() {
@@ -1428,6 +1445,17 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            if let Some(area) = app.get_webview_window("print-area") {
+                area.with_webview(|webview| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = webview.inner().settings() {
+                        settings.set_hardware_acceleration_policy(
+                            webkit2gtk::HardwareAccelerationPolicy::Never,
+                        );
+                    }
+                })?;
+            }
             let data = match std::env::var_os("TINREC_DATA_DIR") {
                 Some(path) => PathBuf::from(path),
                 None => app.path().app_config_dir()?,
@@ -1485,6 +1513,7 @@ fn main() {
                     webcam_preview: None,
                 }),
             }));
+            app.manage(screenshots::Prints::default());
             app.manage(shortcuts::Shortcuts::new(data.join("shortcuts.json")));
             if std::env::var_os("WAYLAND_DISPLAY").is_none() || !cfg!(target_os = "linux") {
                 app.handle()
@@ -1504,6 +1533,20 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            screenshots::begin_print_edit,
+            screenshots::get_print_area,
+            screenshots::select_print_area,
+            screenshots::save_print_project,
+            screenshots::open_print_project,
+            screenshots::capture_print,
+            screenshots::close_print,
+            screenshots::export_print,
+            screenshots::get_print_keep_local,
+            screenshots::set_print_keep_local,
+            screenshots::list_prints,
+            screenshots::open_print,
+            screenshots::print_site,
+            screenshots::upload_print,
             shortcuts::local_shortcut,
             shortcuts::get_shortcuts,
             shortcuts::save_shortcuts,
@@ -1566,14 +1609,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn wayland_area_uses_portal_selection_without_a_second_crop() {
-        assert!(portal_handles_area(true, true, "area"));
-        assert!(!portal_handles_area(true, false, "area"));
-        assert!(!portal_handles_area(false, true, "area"));
-        assert!(!portal_handles_area(true, true, "window"));
-        assert!(!portal_handles_area(true, true, "camera"));
-    }
     #[test]
     fn capture_monitor_matching_accepts_physical_and_scaled_dimensions() {
         assert!(source_matches_monitor(2560, 1440, 1.25, 2560, 1440));

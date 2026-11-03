@@ -26,6 +26,7 @@ const defaults: Settings = {
   camera: "",
   webcamEnabled: false,
   keepLocal: true,
+  keepPrintLocal: true,
   title: defaultRecordingName,
   display: "auto",
   microphoneDevice: null,
@@ -49,6 +50,7 @@ function loadSettings(): Settings {
       window: typeof data.window === "string" ? data.window : "",
       webcamEnabled: data.webcamEnabled === true,
       camera: typeof data.camera === "string" ? data.camera : "",
+      keepPrintLocal: data.keepPrintLocal !== false,
       keepLocal: typeof data.keepLocal === "boolean" ? data.keepLocal : true,
       title:
         typeof data.title === "string" && (saved !== null || data.title.trim())
@@ -121,6 +123,7 @@ export function useRecorder() {
       call<string>("get_folder"),
       refreshFiles(),
       call<Snapshot>("get_snapshot"),
+      call<boolean>("get_print_keep_local"),
     ]);
     if (!mounted.current) return;
     const [sourceResult, toolsResult, folderResult, , snapshotResult] = results;
@@ -128,6 +131,15 @@ export function useRecorder() {
     if (toolsResult.status === "fulfilled") setTools(toolsResult.value);
     if (folderResult.status === "fulfilled") setFolder(folderResult.value);
     if (snapshotResult.status === "fulfilled") accept(snapshotResult.value);
+    const printStorage = results[5];
+    if (
+      printStorage.status === "fulfilled" &&
+      typeof printStorage.value === "boolean"
+    )
+      setSettings((previous) => ({
+        ...previous,
+        keepPrintLocal: printStorage.value as boolean,
+      }));
     const failed = results.find((result) => result.status === "rejected");
     if (failed?.status === "rejected") setError(message(failed.reason));
     setLoading(false);
@@ -186,7 +198,11 @@ export function useRecorder() {
     }
   }
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
-    setSettings((previous) => ({ ...previous, [key]: value }));
+    if (key === "keepPrintLocal") {
+      void call("set_print_keep_local", { keep: value })
+        .then(() => setSettings((previous) => ({ ...previous, [key]: value })))
+        .catch((e) => setError(message(e)));
+    } else setSettings((previous) => ({ ...previous, [key]: value }));
   }
   return {
     settings,
@@ -230,7 +246,11 @@ export function useRecorder() {
         if (error) throw new Error(error);
         accept(
           await call<Snapshot>("start_recording", {
-            request: { ...request, title },
+            request: Object.fromEntries(
+              Object.entries({ ...request, title }).filter(
+                ([key]) => key !== "keepPrintLocal",
+              ),
+            ),
           }),
         );
       }),

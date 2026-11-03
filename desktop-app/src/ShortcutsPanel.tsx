@@ -4,6 +4,9 @@ import { Keyboard, X } from "lucide-react";
 import { call, message } from "./bridge";
 
 export const shortcutActions = [
+  ["screenshot", "Print de área", "Seleciona e anota uma área da tela."],
+  ["screenshot-screen", "Print de tela", "Captura o monitor escolhido."],
+  ["screenshot-window", "Print de janela", "Captura uma janela."],
   ["screen", "Gravar tela", "Escolhe uma tela e inicia a captura."],
   ["window", "Gravar janela", "Abre a escolha de janela para gravação."],
   ["area", "Gravar área", "Abre a seleção da área para gravação."],
@@ -28,6 +31,18 @@ export const shortcutActions = [
   ["controls", "Mostrar mini menu", "Abre os controles da gravação atual."],
   ["library", "Abrir biblioteca", "Mostra seus vídeos no aplicativo."],
 ] as const;
+const shortcutGroups = [
+  {
+    title: "Gravação",
+    actions: ["screen", "window", "area", "start", "stop", "pause", "controls"],
+  },
+  {
+    title: "Prints",
+    actions: ["screenshot-screen", "screenshot-window", "screenshot"],
+  },
+  { title: "Áudio", actions: ["microphone", "system"] },
+  { title: "Navegação", actions: ["show", "library"] },
+];
 interface ShortcutView {
   bindings: Record<string, string>;
   active: Record<string, string>;
@@ -129,59 +144,72 @@ export function ShortcutsPanel() {
           Atalhos de teclado
         </h2>
       </div>
-      <div className="shortcut-list">
-        {shortcutActions.map(([action, label, description]) => (
-          <div className="shortcut-row" key={action}>
-            <div>
-              <label htmlFor={`shortcut-${action}`}>{label}</label>
-              <p>{description}</p>
-              {view.active[action] ? (
-                <span className="shortcut-active">
-                  Ativo: {view.active[action]}
-                </span>
-              ) : null}
-            </div>
-            <input
-              id={`shortcut-${action}`}
-              aria-label={`Atalho: ${label}`}
-              placeholder="Não configurado"
-              value={draft[action] ?? ""}
-              disabled={pending}
-              spellCheck={false}
-              maxLength={80}
-              onFocus={() =>
-                void call("shortcut_capture", { enabled: true }).catch(() => {})
-              }
-              onBlur={() =>
-                void call("shortcut_capture", { enabled: false }).catch(
-                  () => {},
-                )
-              }
-              onChange={(event) => update(action, event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.currentTarget.blur();
-                  return;
-                }
-                const value = captureShortcut(event);
-                if (value) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  if (!event.repeat) update(action, value);
-                }
-              }}
-            />
-            <button
-              className="icon-button"
-              aria-label={`Remover atalho: ${label}`}
-              disabled={pending || !draft[action]}
-              onClick={() => update(action, "")}
-            >
-              <X size={14} />
-            </button>
+      {shortcutGroups.map((group) => (
+        <section
+          className="shortcut-group"
+          key={group.title}
+          aria-label={group.title}
+        >
+          <h3>{group.title}</h3>
+          <div className="shortcut-list">
+            {group.actions
+              .map((id) => shortcutActions.find(([action]) => action === id)!)
+              .map(([action, label, description]) => (
+                <div className="shortcut-row" key={action}>
+                  <div>
+                    <label htmlFor={`shortcut-${action}`}>{label}</label>
+                    <p>{description}</p>
+                    {view.active[action] ? (
+                      <span className="shortcut-active">
+                        Ativo: {view.active[action]}
+                      </span>
+                    ) : null}
+                  </div>
+                  <input
+                    id={`shortcut-${action}`}
+                    aria-label={`Atalho: ${label}`}
+                    placeholder="Não configurado"
+                    value={draft[action] ?? ""}
+                    disabled={pending}
+                    spellCheck={false}
+                    maxLength={80}
+                    onFocus={() =>
+                      void call("shortcut_capture", { enabled: true }).catch(
+                        () => {},
+                      )
+                    }
+                    onBlur={() =>
+                      void call("shortcut_capture", { enabled: false }).catch(
+                        () => {},
+                      )
+                    }
+                    onChange={(event) => update(action, event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.currentTarget.blur();
+                        return;
+                      }
+                      const value = captureShortcut(event);
+                      if (value) {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        if (!event.repeat) update(action, value);
+                      }
+                    }}
+                  />
+                  <button
+                    className="icon-button"
+                    aria-label={`Remover atalho: ${label}`}
+                    disabled={pending || !draft[action]}
+                    onClick={() => update(action, "")}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
           </div>
-        ))}
-      </div>
+        </section>
+      ))}
       {(error ?? view.error) ? (
         <p className="name-error" role="alert">
           {error ?? view.error}

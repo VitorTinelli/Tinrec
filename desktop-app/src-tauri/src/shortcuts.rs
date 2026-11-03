@@ -12,6 +12,9 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 const ACTIONS: &[(&str, &str)] = &[
+    ("screenshot", "Print de área"),
+    ("screenshot-screen", "Print de tela"),
+    ("screenshot-window", "Print de janela"),
     ("screen", "Gravar tela"),
     ("window", "Gravar janela"),
     ("area", "Gravar área"),
@@ -306,6 +309,9 @@ fn dispatch(app: &tauri::AppHandle, action: &str) {
     match action {
         "show" | "library" => {
             let _ = show_recorder(app.clone());
+            let _ = app.emit_to("main", "shortcut-action", action);
+        }
+        "screenshot" | "screenshot-screen" | "screenshot-window" if !snapshot.busy() => {
             let _ = app.emit_to("main", "shortcut-action", action);
         }
         "start" | "screen" | "window" | "area" if !snapshot.busy() => {

@@ -51,6 +51,7 @@ export interface Settings {
   camera: string;
   webcamEnabled: boolean;
   keepLocal: boolean;
+  keepPrintLocal?: boolean;
   title: string;
   display: string;
   microphoneDevice: string | null;

@@ -4,7 +4,8 @@
   "description": "Eventos da janela principal. Arquivos s\u00e3o abertos por comandos Rust restritos \u00e0s grava\u00e7\u00f5es.",
   "windows": [
     "main",
-    "area"
+    "area",
+    "print-area"
   ],
   "permissions": [
     "core:event:default"

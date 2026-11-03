@@ -64,7 +64,14 @@ beforeEach(() => {
           platform,
           wayland,
           windows: [{ id: "window-1", name: "Editor" }],
-          displays: [],
+          displays: [
+            {
+              id: "monitor-right",
+              name: "Monitor direito",
+              width: 1920,
+              height: 1080,
+            },
+          ],
           microphones: ["USB Mic"],
           warnings: [],
         };
@@ -186,7 +193,7 @@ describe("gravador desktop", () => {
       }),
     });
     await publish({ phase: "recording", elapsedSeconds: 5 });
-    await user.click(screen.getByRole("button", { name: /Meus vídeos/ }));
+    await user.click(screen.getByRole("button", { name: /Biblioteca/ }));
     await user.click(screen.getByRole("button", { name: "Gravador" }));
     expect(screen.getByRole("button", { name: "Pausar" })).toHaveProperty(
       "disabled",
@@ -220,7 +227,7 @@ describe("gravador desktop", () => {
       true,
     );
     await publish({ phase: "completed", elapsedSeconds: 8 });
-    await user.click(screen.getByRole("button", { name: /Meus vídeos/ }));
+    await user.click(screen.getByRole("button", { name: /Biblioteca/ }));
     await screen.findByRole("button", { name: "Abrir Conversa" });
     await user.click(screen.getByRole("button", { name: "Abrir Conversa" }));
     expect(call).toHaveBeenCalledWith("open_recording", {
@@ -246,7 +253,7 @@ describe("gravador desktop", () => {
     expect(title).toHaveProperty("required", true);
     expect(screen.getByLabelText("Qualidade")).toHaveProperty("value", "1080");
     const keepLocal = screen.getByRole("checkbox", {
-      name: "Manter uma cópia no computador",
+      name: "Salvar vídeos no computador",
     });
     expect(keepLocal).toHaveProperty("checked", true);
     await user.click(keepLocal);
@@ -281,7 +288,7 @@ describe("gravador desktop", () => {
       screen.getByRole("textbox", { name: /Nome do vídeo/ }),
     ).toHaveProperty("value", "Reunião{data}");
     expect(
-      screen.getByRole("checkbox", { name: "Manter uma cópia no computador" }),
+      screen.getByRole("checkbox", { name: "Salvar vídeos no computador" }),
     ).toHaveProperty("checked", false);
   });
   it("inicia pelos atalhos globais e navega sem disparar outra gravação em andamento", async () => {
@@ -307,7 +314,7 @@ describe("gravador desktop", () => {
       vi.mocked(call).mock.calls.filter(([name]) => name === "start_recording"),
     ).toHaveLength(count);
     await act(async () => shortcutListener({ payload: "library" }));
-    expect(screen.getByRole("heading", { name: "Meus vídeos" })).not.toBeNull();
+    expect(screen.getByRole("heading", { name: "Biblioteca" })).not.toBeNull();
     await act(async () => shortcutListener({ payload: "settings" }));
     expect(
       screen.getByRole("heading", { name: "Configurações" }),
@@ -425,4 +432,57 @@ describe("gravador desktop", () => {
     );
     expect(screen.getByText("Gravação pausada")).not.toBeNull();
   });
+});
+it("mantém captura na tela principal e prints salvos em tela própria", async () => {
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", { name: "Print" }));
+  expect(
+    screen.getByRole("button", { name: "Print da tela" }).querySelector("svg"),
+  ).toBeTruthy();
+  expect(screen.queryByRole("searchbox", { name: "Buscar prints" })).toBeNull();
+  await userEvent.click(screen.getByRole("button", { name: "Prints" }));
+  expect(
+    await screen.findByRole("heading", { name: "Prints", level: 1 }),
+  ).toBeTruthy();
+  expect(screen.getByRole("searchbox", { name: "Buscar prints" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Print da tela" })).toBeNull();
+});
+
+it("mantém preferências de armazenamento de vídeo e print independentes", async () => {
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", { name: "Configurações" }));
+  const videos = screen.getByRole("checkbox", {
+    name: "Salvar vídeos no computador",
+  });
+  const prints = screen.getByRole("checkbox", {
+    name: "Salvar prints no computador",
+  });
+  await userEvent.click(prints);
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith("set_print_keep_local", { keep: false }),
+  );
+  expect(videos).toHaveProperty("checked", true);
+  expect(prints).toHaveProperty("checked", false);
+  expect(screen.getByText("/tmp/Tinrec/Videos")).toBeTruthy();
+  expect(screen.getByText("/tmp/Tinrec/Prints")).toBeTruthy();
+});
+it.each([
+  ["screenshot-screen", "screen"],
+  ["screenshot-window", "window"],
+  ["screenshot", "area"],
+])("encaminha atalho %s ao modo de print %s", async (action, mode) => {
+  render(<App />);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
+      "disabled",
+      false,
+    ),
+  );
+  await act(async () => shortcutListener({ payload: action }));
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith(
+      "capture_print",
+      expect.objectContaining({ mode }),
+    ),
+  );
 });
