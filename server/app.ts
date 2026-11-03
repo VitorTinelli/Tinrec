@@ -39,6 +39,7 @@ const view = (r: any) => ({
   createdAt: r.created_at,
   durationMs: Number(r.duration_ms),
   resolution: r.resolution,
+  mediaType: r.media_type ?? "video",
   status: r.status,
   sizeBytes: Number(r.size_bytes),
   uploadedBytes: Number(r.uploaded_bytes),
@@ -343,11 +344,12 @@ export function createApp(
         id: uuid,
         title,
         resolution: z.union([z.literal(720), z.literal(1080)]),
+        mediaType: z.enum(["video", "image"]).default("video"),
       })
       .parse(req.body);
     await db.query(
-      "INSERT INTO recordings(id,owner_id,public_id,title,resolution) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING",
-      [b.id, s.user_id, token(24), b.title, b.resolution],
+      "INSERT INTO recordings(id,owner_id,public_id,title,resolution,media_type) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING",
+      [b.id, s.user_id, token(24), b.title, b.resolution, b.mediaType],
     );
     const {
       rows: [r],
@@ -355,7 +357,8 @@ export function createApp(
       b.id,
       s.user_id,
     ]);
-    if (!r) throw new HttpError(409, "conflict", "Identificador já utilizado.");
+    if (!r || r.media_type !== b.mediaType)
+      throw new HttpError(409, "conflict", "Identificador já utilizado.");
     res.json(view(r));
   });
   app.get("/api/recordings", async (req, res) => {
@@ -371,7 +374,7 @@ export function createApp(
     const { s, r } = await owned(req);
     const b = z.object({ title }).parse(req.body);
     if (r.drive_file_id)
-      await drive.rename(s.user_id, r.drive_file_id, b.title);
+      await drive.rename(s.user_id, r.drive_file_id, b.title, r.media_type);
     await db.query("UPDATE recordings SET title=$1 WHERE id=$2", [
       b.title,
       r.id,
@@ -405,6 +408,10 @@ export function createApp(
   });
   app.post("/api/recordings/:id/temporary", async (req, res) => {
     const { r } = await owned(req);
+    if (r.media_type === "image") {
+      res.json({ available: false, reason: "image_direct_drive" });
+      return;
+    }
     const b = z
       .object({
         sizeBytes: z
@@ -647,6 +654,7 @@ export function createApp(
         ? await storage.playback(`temporary/${r.public_id}.mp4`)
         : null;
     res.json({
+      mediaType: r.media_type ?? "video",
       playbackUrl,
       playbackExpiresAt: playbackUrl ? Date.now() + 3600_000 : null,
       driveReady: !!r.drive_ready_at,

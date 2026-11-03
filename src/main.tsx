@@ -34,6 +34,7 @@ type Recording = {
   createdAt: string;
   durationMs: number;
   resolution: number;
+  mediaType?: "video" | "image";
   status: string;
   sizeBytes: number;
   uploadedBytes: number;
@@ -64,7 +65,13 @@ const date = (s: string) =>
 function Brand() {
   return (
     <a className="brand" href="/">
-      <img className="brand-mark" src="/tinrec-icon.svg" alt="" width="34" height="34" />
+      <img
+        className="brand-mark"
+        src="/tinrec-icon.svg"
+        alt=""
+        width="34"
+        height="34"
+      />
       Tinrec<span className="brand-dot">.</span>
     </a>
   );
@@ -116,6 +123,9 @@ function Dashboard({
   user: { email: string } | null;
   error: string;
 }) {
+  const [mediaFilter, setMediaFilter] = useState<"all" | "video" | "image">(
+    "all",
+  );
   const [videos, setVideos] = useState<Recording[]>([]),
     [query, setQuery] = useState(""),
     [section, setSection] = useState("library"),
@@ -162,9 +172,13 @@ function Dashboard({
       setError("Não foi possível copiar. Abra o vídeo e copie o endereço.");
     }
   }
-  const filtered = videos.filter((v) =>
-    v.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
-  );
+  const filtered = videos
+    .filter(
+      (v) => mediaFilter === "all" || (v.mediaType ?? "video") === mediaFilter,
+    )
+    .filter((v) =>
+      v.title.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
+    );
   async function saveTitle(e: React.FormEvent) {
     e.preventDefault();
     if (!rename) return;
@@ -435,15 +449,28 @@ function Dashboard({
               </section>
               <div className="library-toolbar">
                 <div className="tabs">
-                  <button className="selected">
-                    Todos os vídeos <span>{videos.length}</span>
-                  </button>
+                  {(
+                    [
+                      ["all", "Todos"],
+                      ["video", "Vídeos"],
+                      ["image", "Prints"],
+                    ] as const
+                  ).map(([value, label]) => (
+                    <button
+                      key={value}
+                      className={mediaFilter === value ? "selected" : ""}
+                      onClick={() => setMediaFilter(value)}
+                    >
+                      {label}
+                      {value === "all" && <span>{videos.length}</span>}
+                    </button>
+                  ))}
                 </div>
                 <label className="search">
                   <Search size={17} />
                   <input
-                    aria-label="Buscar vídeos"
-                    placeholder="Buscar um vídeo…"
+                    aria-label="Buscar arquivos"
+                    placeholder="Buscar…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                   />
@@ -465,11 +492,17 @@ function Dashboard({
                           <span />
                           <span />
                         </div>
-                        <span className="preview-play">
-                          <Play size={21} fill="currentColor" />
+                        {v.mediaType !== "image" && (
+                          <span className="preview-play">
+                            <Play size={21} fill="currentColor" />
+                          </span>
+                        )}
+                        <span className="quality">
+                          {v.mediaType === "image" ? "PNG" : `${v.resolution}p`}
                         </span>
-                        <span className="quality">{v.resolution}p</span>
-                        <span className="duration">{time(v.durationMs)}</span>
+                        {v.mediaType !== "image" && (
+                          <span className="duration">{time(v.durationMs)}</span>
+                        )}
                       </a>
                       <div className="card-body">
                         <div className="card-title">
@@ -721,6 +754,7 @@ function PublicVideo({ id }: { id: string }) {
       title: string;
       status: string;
       progress: number;
+      mediaType?: "video" | "image";
       embedUrl: string | null;
       playbackUrl?: string | null;
       playbackExpiresAt?: number | null;
@@ -774,14 +808,24 @@ function PublicVideo({ id }: { id: string }) {
         <div className="eyebrow">COMPARTILHADO COM VOCÊ</div>
         <h1>{video?.title ?? "Seu vídeo está aqui"}</h1>
         {!error && (video?.playbackUrl || video?.embedUrl) ? (
-          <VideoPlayer
-            video={video as Playback}
-            publicId={id}
-            onRefresh={() => {
-              setVideo(null);
-              setRefresh((n) => n + 1);
-            }}
-          />
+          video.mediaType === "image" ? (
+            <div className="player image-player">
+              <iframe
+                title={video.title}
+                src={video.embedUrl!}
+                allowFullScreen
+              />
+            </div>
+          ) : (
+            <VideoPlayer
+              video={video as Playback}
+              publicId={id}
+              onRefresh={() => {
+                setVideo(null);
+                setRefresh((n) => n + 1);
+              }}
+            />
+          )
         ) : (
           <div className="player">
             {error ? (

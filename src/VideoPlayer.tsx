@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 export interface Playback {
   title: string;
+  mediaType?: "video" | "image";
   embedUrl: string | null;
   playbackUrl?: string | null;
   playbackExpiresAt?: number | null;

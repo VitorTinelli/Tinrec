@@ -97,6 +97,7 @@ describe("owner boundary and public sharing", () => {
       "canConfirmDrive",
       "driveReady",
       "embedUrl",
+      "mediaType",
       "playbackExpiresAt",
       "playbackUrl",
       "progress",
@@ -258,5 +259,47 @@ describe("discarding a live capture", () => {
           .send({})
       ).status,
     ).toBe(409);
+  });
+});
+
+describe("edited screenshot uploads", () => {
+  it("preserves image media type, bypasses video staging, and rejects type changes", async () => {
+    const id = randomUUID();
+    const reservation = await request(app)
+      .post("/api/recordings")
+      .auth(device, { type: "bearer" })
+      .send({
+        id,
+        title: "Print editado",
+        resolution: 1080,
+        mediaType: "image",
+      });
+    expect(reservation.status).toBe(200);
+    expect(reservation.body.mediaType).toBe("image");
+    const staging = await request(app)
+      .post(`/api/recordings/${id}/temporary`)
+      .auth(device, { type: "bearer" })
+      .send({ sizeBytes: 1024, durationMs: 0 });
+    expect(staging.status).toBe(200);
+    expect(staging.body.available).toBe(false);
+    const upload = await request(app)
+      .post(`/api/recordings/${id}/upload`)
+      .auth(device, { type: "bearer" })
+      .send({ sizeBytes: 1024, durationMs: 0 });
+    expect(upload.status).toBe(200);
+    expect(drive.start).toHaveBeenCalledWith(
+      "owner",
+      expect.objectContaining({ media_type: "image" }),
+      false,
+    );
+    const published = await request(app).get(
+      `/api/public/${reservation.body.publicId}`,
+    );
+    expect(published.body.mediaType).toBe("image");
+    const collision = await request(app)
+      .post("/api/recordings")
+      .auth(device, { type: "bearer" })
+      .send({ id, title: "Troca", resolution: 1080, mediaType: "video" });
+    expect(collision.status).toBe(409);
   });
 });

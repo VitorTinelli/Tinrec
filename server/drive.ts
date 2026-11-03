@@ -7,7 +7,12 @@ export interface Drive {
     restart: boolean,
   ): Promise<{ uri: string; fileId: string }>;
   complete(userId: string, recording: any): Promise<void>;
-  rename(userId: string, fileId: string, title: string): Promise<void>;
+  rename(
+    userId: string,
+    fileId: string,
+    title: string,
+    mediaType?: string,
+  ): Promise<void>;
 }
 export function driveFailure(status: number, body: any): HttpError {
   const reasons = [
@@ -151,6 +156,8 @@ export function googleDrive(db: Database): Drive {
   }
   return {
     async start(userId, r, restart) {
+      const mime = r.media_type === "image" ? "image/png" : "video/mp4";
+      const extension = r.media_type === "image" ? ".png" : ".mp4";
       if (r.upload_uri && !restart)
         return { uri: decrypt(r.upload_uri), fileId: r.drive_file_id };
       const { user, token: t } = await access(userId);
@@ -220,9 +227,9 @@ export function googleDrive(db: Database): Drive {
             },
             body: JSON.stringify({
               id: fileId,
-              name: r.title + ".mp4",
+              name: r.title + extension,
               parents: [folder],
-              mimeType: "video/mp4",
+              mimeType: mime,
               appProperties: { tinrecRecording: r.id },
             }),
             signal: AbortSignal.timeout(15000),
@@ -237,10 +244,10 @@ export function googleDrive(db: Database): Drive {
         {
           method: "PATCH",
           headers: {
-            "X-Upload-Content-Type": "video/mp4",
+            "X-Upload-Content-Type": mime,
             "X-Upload-Content-Length": String(r.size_bytes),
           },
-          body: JSON.stringify({ name: r.title + ".mp4" }),
+          body: JSON.stringify({ name: r.title + extension }),
         },
       );
       const uri = response.headers.get("location");
@@ -262,7 +269,8 @@ export function googleDrive(db: Database): Drive {
       ).json();
       if (
         file.trashed ||
-        file.mimeType !== "video/mp4" ||
+        file.mimeType !==
+          (r.media_type === "image" ? "image/png" : "video/mp4") ||
         Number(file.size) !== Number(r.size_bytes) ||
         file.appProperties?.tinrecRecording !== r.id
       )
@@ -307,11 +315,13 @@ export function googleDrive(db: Database): Drive {
         );
       }
     },
-    async rename(userId, fileId, title) {
+    async rename(userId, fileId, title, mediaType) {
       const { token: t } = await access(userId);
       await request(`https://www.googleapis.com/drive/v3/files/${fileId}`, t, {
         method: "PATCH",
-        body: JSON.stringify({ name: title + ".mp4" }),
+        body: JSON.stringify({
+          name: title + (mediaType === "image" ? ".png" : ".mp4"),
+        }),
       });
     },
   };
