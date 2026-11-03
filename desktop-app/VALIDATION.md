@@ -309,3 +309,42 @@ local usa pending-prints e só remove após status uploaded. Caminhos de limpeza
 continuam restritos aos diretórios temporários. Nova gravação local usa Videos;
 lookup/listagem preservam arquivos antigos da raiz. Testes cobrem independência
 das opções, encaminhamento dos três atalhos e limpeza protegida após upload.
+
+## Validação Windows — 3 de novembro de 2026
+
+- Inicialização: estados e plugins registrados antes da criação das webviews;
+  pasta e seção Google carregaram sem `state not managed` na interface Windows.
+- Encoder: timestamps preservados com `-copyts`; duração nominal de quadro
+  informada no transporte Matroska para evitar prolongar o último quadro de
+  uma tela parada. Regressões reproduziram perda de 1,5 s no início e acréscimo
+  de 1 s no fim antes das correções e passaram depois delas.
+- Windows: relógio nativo ancorado diretamente em QPC, sem incorporar atraso de
+  entrega dos pacotes. Fila limitada do microfone ampliada somente no Windows
+  para absorver rajadas de callbacks sem descartar áudio silenciosamente.
+- `cargo test --locked --release --manifest-path desktop-rust/Cargo.toml
+  --target-dir desktop-app/src-tauri/target --lib --test pipeline -- --include-ignored`:
+  13 testes unitários e 3 testes de pipeline aprovados com FFmpeg/ffprobe 9.0.2.
+- Captura real DXGI em 1080p com áudio do sistema e microfone: tela finalizada
+  por comando Stop passou; área com pausa/retomada e Stop passou com 10,789 s
+  ativos, erro de término de 0,044 s e diferença máxima áudio/vídeo de 0,049 s.
+  Evidências locais em `artifacts/windows-final-*.mp4.capture.json`.
+- Essas verificações técnicas não comprovam sincronização perceptiva, conteúdo
+  audível do áudio do sistema (não houve reprodução controlada) ou estabilidade
+  prolongada. Seleção interativa de área com webcam não foi retestada nesta etapa.
+- Linux: binário existente não foi substituído. Inicialização de janelas,
+  `-copyts` e duração nominal no Matroska são alterações compartilhadas para
+  futuros builds; QPC e ampliação da fila do microfone são exclusivos do Windows.
+  Não houve nova execução nativa Linux nesta máquina Windows.
+
+### Abertura automática após enviar prints
+
+`export_print` (editor e overlay) e `upload_print` (biblioteca) aguardam a
+reserva do link no backend e abrem a página do print no navegador. A espera
+continua após o overlay fechar e termina ao sair do app, desconectar a conta
+ou remover o item da fila. Reenviar um arquivo já enfileirado usa seu link
+existente. Copiar e salvar não acionam a abertura do site.
+
+Validação: 12 testes de `cloud::tests`, incluindo reserva tardia, deduplicação,
+remoção do PNG temporário e isolamento de conta; 7 testes de PrintEditor e
+PrintOverlay aprovados. A abertura real do navegador após um novo upload não
+foi exercitada com uma conta de produção nesta verificação.
