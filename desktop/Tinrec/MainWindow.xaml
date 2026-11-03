@@ -1,4 +1,4 @@
-<Window x:Class="Tinrec.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Tinrec" Width="540" Height="830" MinHeight="600" MinWidth="480" Background="#FAF9FD" Foreground="#302B40" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13">
+<Window x:Class="Tinrec.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Tinrec" Icon="Assets/icon.png" Width="540" Height="830" MinHeight="600" MinWidth="480" Background="#FAF9FD" Foreground="#302B40" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" FontSize="13">
  <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="28">
   <DockPanel Margin="0,0,0,22"><TextBlock Text="◉ tinrec." FontSize="29" FontWeight="Bold" Foreground="#6954DD"/><TextBlock DockPanel.Dock="Right" Text="GRAVE. COMPARTILHE." FontSize="9" Foreground="#A39AAE" VerticalAlignment="Center" HorizontalAlignment="Right"/></DockPanel>
   <TextBlock Text="Uma ideia merece um vídeo." FontSize="22" FontWeight="SemiBold"/>

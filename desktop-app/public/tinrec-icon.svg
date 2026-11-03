@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="tile" x1=".85" y1="0" x2=".15" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#5969e7"/><stop offset=".55" stop-color="#34309e"/><stop offset="1" stop-color="#211878"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="300" y1="355" x2="367" y2="403" gradientUnits="userSpaceOnUse"><stop stop-color="#ffffff"/><stop offset="1" stop-color="#dfe3f8"/></linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#tile)"/>
+  <path fill="#fff" d="M117 163v-43q0-6 6-9l67-36v88h157q-12 27 9 51H190v100q0 43 43 43h67v-17q0-30 30-30h50v-66q18 4 34-2v73q0 14-10 24l-59 61q-13 14-32 14h-80q-116 0-116-114v-86H60l24-39q7-12 20-12z"/>
+  <path fill="url(#fold)" d="M300 357v-17q0-30 30-30h84q0 16-10 29l-59 61q-13 14-32 14h-13z"/>
+  <circle cx="394" cy="182" r="38" fill="#ff7c87"/>
+</svg>

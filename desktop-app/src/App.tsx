@@ -223,9 +223,7 @@ export default function App() {
     >
       <header className="topbar">
         <div className="brand">
-          <span className="brand-symbol">
-            <Circle size={18} fill="currentColor" strokeWidth={0} />
-          </span>
+          <img className="brand-symbol" src="/tinrec-icon.svg" alt="" width="36" height="36" />
           <span>
             Tinrec<span className="brand-dot">.</span>
           </span>

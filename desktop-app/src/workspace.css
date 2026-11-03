@@ -959,3 +959,7 @@ html.area-window, .area-window body, .area-window #root {
 .view-recorder .capture-modes{grid-template-columns:repeat(3,minmax(0,1fr))}
 
 .audio-grid .audio-heading{min-height:20px}.audio-grid .device-card-name{height:14px;line-height:14px;margin-top:8px}.audio-grid .volume-row{margin-top:8px}
+
+/* Tinrec ribbon identity. */
+.brand-symbol { background: none; border-radius: 0; box-shadow: none; object-fit: contain; }
+.brand-dot { color: #ff7c87; }

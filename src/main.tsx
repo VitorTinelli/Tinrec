@@ -64,10 +64,8 @@ const date = (s: string) =>
 function Brand() {
   return (
     <a className="brand" href="/">
-      <span className="brand-mark">
-        <span />
-      </span>
-      tinrec<span className="brand-dot">.</span>
+      <img className="brand-mark" src="/tinrec-icon.svg" alt="" width="34" height="34" />
+      Tinrec<span className="brand-dot">.</span>
     </a>
   );
 }
