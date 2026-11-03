@@ -202,6 +202,11 @@ impl Cloud {
         Ok(value)
     }
     pub fn recording_url(&self, path: &Path) -> Reply<String> {
+        self.reserved_url(path)?.ok_or(
+            "O link deste vídeo ainda está sendo preparado. Tente novamente em instantes.".into(),
+        )
+    }
+    pub fn reserved_url(&self, path: &Path) -> Reply<Option<String>> {
         let i = lock(&self.inner)?;
         let account = &i
             .auth
@@ -220,9 +225,7 @@ impl Cloud {
                         || fs::canonicalize(&job.path).is_ok_and(|value| value == path))
             })
             .ok_or("Este vídeo ainda não foi enviado ao site pela conta conectada.")?;
-        job.url.clone().ok_or(
-            "O link deste vídeo ainda está sendo preparado. Tente novamente em instantes.".into(),
-        )
+        Ok(job.url.clone())
     }
     pub fn connect(&self) -> Reply<String> {
         let _operation = lock(&self.operation)?;
@@ -1009,6 +1012,47 @@ mod tests {
         assert!(c.recording_url(&first).is_err());
         c.inner.lock().unwrap().auth = None;
         assert!(c.recording_url(&first).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn print_page_waits_for_reservation_and_reuses_existing_upload() {
+        let (c, dir) = test_cloud();
+        authenticate(&c, "owner");
+        let path = dir.join("pending-prints").join("print.png");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"png").unwrap();
+        c.enqueue(
+            "print".into(),
+            path.clone(),
+            "Print".into(),
+            1080,
+            0.,
+            false,
+        )
+        .unwrap();
+        assert_eq!(c.reserved_url(&path).unwrap(), None);
+        c.enqueue(
+            "duplicate".into(),
+            path.clone(),
+            "Print".into(),
+            1080,
+            0.,
+            false,
+        )
+        .unwrap();
+        {
+            let mut i = c.inner.lock().unwrap();
+            assert_eq!(i.saved.jobs.len(), 1);
+            i.saved.jobs[0].url = Some(format!("{SITE}/v/print"));
+        }
+        // Temporary files can be removed after upload before the opener runs.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            c.reserved_url(&path).unwrap(),
+            Some(format!("{SITE}/v/print"))
+        );
+        authenticate(&c, "another");
+        assert!(c.reserved_url(&path).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

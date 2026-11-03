@@ -513,10 +513,11 @@ pub async fn export_print(
     let upload_id = if action == "upload" {
         state
             .cloud
-            .enqueue(id.clone(), path, title, 1080, 0., false)?;
+            .enqueue(id.clone(), path.clone(), title, 1080, 0., false)?;
         if !keep_local {
             state.cloud.remove_local_after_upload(&id)?;
         }
+        open_uploaded_print(app.clone(), state.inner().clone(), path);
         Some(id)
     } else {
         None
@@ -594,16 +595,42 @@ pub fn open_print(app: tauri::AppHandle, state: State<'_, Shared>, file_name: St
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub fn upload_print(state: State<'_, Shared>, file_name: String) -> Reply<()> {
+pub fn upload_print(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    file_name: String,
+) -> Reply<()> {
     let path = print_path(&state, &file_name)?;
     state.cloud.enqueue(
         uuid::Uuid::new_v4().to_string(),
-        path,
+        path.clone(),
         file_name.trim_end_matches(".png").to_string(),
         1080,
         0.,
         false,
-    )
+    )?;
+    open_uploaded_print(app, state.inner().clone(), path);
+    Ok(())
+}
+
+// The overlay can close before the server reserves the page. Keep this work in
+// the backend and resolve by path so an already-queued print opens its own page.
+fn open_uploaded_print(app: tauri::AppHandle, state: Shared, path: std::path::PathBuf) {
+    tauri::async_runtime::spawn_blocking(move || {
+        while !state.exiting.load(Ordering::Acquire) {
+            match state.cloud.reserved_url(&path) {
+                Ok(Some(url)) => {
+                    if let Err(error) = app.opener().open_url(url, None::<&str>) {
+                        eprintln!("Print enviado, mas não foi possível abrir o navegador: {error}");
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(_) => return,
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    });
 }
 #[tauri::command]
 pub fn print_site(app: tauri::AppHandle, state: State<'_, Shared>, file_name: String) -> Reply<()> {
