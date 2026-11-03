@@ -1445,35 +1445,10 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            #[cfg(target_os = "linux")]
-            if let Some(area) = app.get_webview_window("print-area") {
-                area.with_webview(|webview| {
-                    use webkit2gtk::{SettingsExt, WebViewExt};
-                    if let Some(settings) = webview.inner().settings() {
-                        settings.set_hardware_acceleration_policy(
-                            webkit2gtk::HardwareAccelerationPolicy::Never,
-                        );
-                    }
-                })?;
-            }
             let data = match std::env::var_os("TINREC_DATA_DIR") {
                 Some(path) => PathBuf::from(path),
                 None => app.path().app_config_dir()?,
             };
-            if let Some(controls) = app.get_webview_window("controls")
-                && let Some(main) = app.get_webview_window("main")
-                && let Ok(Some(monitor)) = main.current_monitor()
-            {
-                let size = monitor.size();
-                let origin = monitor.position();
-                let scale = monitor.scale_factor();
-                let width = (536.0 * scale) as i32;
-                let height = (56.0 * scale) as i32;
-                let _ = controls.set_position(tauri::PhysicalPosition::new(
-                    origin.x + (size.width as i32 - width).max(0) / 2,
-                    origin.y + (size.height as i32 - height - (40.0 * scale) as i32).max(0),
-                ));
-            }
             fs::create_dir_all(&data)?;
             let config = data.join("desktop.json");
             let saved = fs::read(&config)
@@ -1528,6 +1503,36 @@ fn main() {
                     let _ = manager.apply(&shortcut_app, view.bindings).await;
                 }
             });
+            // Webviews can invoke commands while setup is still running on Windows.
+            // Register all managed state and plugins before loading any frontend.
+            for window in &app.config().app.windows {
+                tauri::WebviewWindowBuilder::from_config(app, window)?.build()?;
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(area) = app.get_webview_window("print-area") {
+                area.with_webview(|webview| {
+                    use webkit2gtk::{SettingsExt, WebViewExt};
+                    if let Some(settings) = webview.inner().settings() {
+                        settings.set_hardware_acceleration_policy(
+                            webkit2gtk::HardwareAccelerationPolicy::Never,
+                        );
+                    }
+                })?;
+            }
+            if let Some(controls) = app.get_webview_window("controls")
+                && let Some(main) = app.get_webview_window("main")
+                && let Ok(Some(monitor)) = main.current_monitor()
+            {
+                let size = monitor.size();
+                let origin = monitor.position();
+                let scale = monitor.scale_factor();
+                let width = (536.0 * scale) as i32;
+                let height = (56.0 * scale) as i32;
+                let _ = controls.set_position(tauri::PhysicalPosition::new(
+                    origin.x + (size.width as i32 - width).max(0) / 2,
+                    origin.y + (size.height as i32 - height - (40.0 * scale) as i32).max(0),
+                ));
+            }
             position_webcam_window(app.handle());
             tray::setup(app)?;
             Ok(())

@@ -13,6 +13,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Tinrec",
         "width": 820,
         "height": 700,
@@ -23,6 +24,7 @@
       },
       {
         "label": "controls",
+        "create": false,
         "title": "Tinrec \u00b7 controles",
         "url": "index.html?window=controls",
         "width": 536,
@@ -38,6 +40,7 @@
       },
       {
         "label": "webcam",
+        "create": false,
         "title": "Tinrec \u00b7 webcam",
         "url": "index.html?window=webcam",
         "width": 216,
@@ -54,6 +57,7 @@
       },
       {
         "label": "area",
+        "create": false,
         "title": "Tinrec \u00b7 selecionar \u00e1rea",
         "url": "index.html?window=area",
         "width": 800,
@@ -70,6 +74,7 @@
       },
       {
         "label": "print-area",
+        "create": false,
         "title": "Tinrec \u00b7 print",
         "url": "index.html?window=print-area",
         "width": 800,
