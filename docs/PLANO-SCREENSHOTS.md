@@ -1,6 +1,6 @@
 # Plano: captura de screenshots no Tinrec
 
-Status: revisão e planejamento; implementação não iniciada.
+Status: implementação concluída em 02/11/2026; validação física dos seletores e do clipboard ainda necessária por sistema.
 Base: estado atual do aplicativo Rust/Tauri, incluindo alterações locais pendentes.
 
 ## Resultado proposto
@@ -22,7 +22,7 @@ serviços externos do FireShot e print durante gravação são recursos distinto
 fora deste planejamento inicial. Não copiar a identidade visual do FireShot;
 manter os componentes e a aparência do Tinrec.
 
-## Revisão do código e implicações
+## Revisão inicial do código e implicações (histórico)
 
 1. `desktop-rust/src/recording.rs`: já cria uma CaptureSession, recebe VideoFrame
    e converte o buffer com to_tight_bytes. Mas run_inner também configura áudio,

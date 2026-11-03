@@ -217,3 +217,95 @@ visibilidade da janela e seguem executando até Sair ser acionado.
 - Decoder: fonte FFmpeg gerada testa câmera quadrada e encerramento/reabertura do processo no mesmo arquivo de log.
 - Nativo: 15 testes aprovados, incluindo persistência da posição e rejeição de valores inválidos. Clippy sem avisos.
 - Executável Linux atualizado. Câmera física, arraste no compositor real e captura da janela flutuante no Linux ainda exigem teste manual; os testes automatizados não acessam a câmera pessoal. Windows e macOS não foram executados neste ambiente.
+
+
+## Prints — 02/11/2026
+
+Editor verificado no navegador com imagem sintética: arraste inicial, recorte,
+redimensionamento, desfazer, conta-gotas e exportação real em canvas. Máscara opaca
+verificada nos pixels exportados. Evidência: `/tmp/tinrec-editor-prints.png`.
+Testes cobrem documento, efeitos, composição final nos três destinos, MIME PNG no
+Drive, API e persistência da fila. Site publicado e migração de media_type aplicada.
+Não foi realizado upload real na conta pessoal, nem teste físico de permissões,
+seletores e clipboard em Windows/macOS/Linux. Esses testes permanecem manuais.
+
+Verificação final: 83 testes web/API e 20 testes Rust passaram; builds web/desktop,
+Clippy com warnings como erro e build release Linux passaram. Suíte desktop:
+53 testes passaram. Executável atualizado em artifacts/Tinrec-linux-x64.
+
+Ajuste do fluxo Wayland: prints usam um quadro PipeWire, sem o painel Screenshot
+do KDE. Área usa o overlay Tinrec; o portal recebe apenas fontes de monitor.
+Clippy e testes de screenshots verificados; interação física KDE pendente.
+
+Fluxo revisado por solicitação: editor removido da interface de captura; PNG salvo
+e copiado diretamente, envio explícito pela biblioteca. Testes verificam os dois
+destinos e preservação do arquivo quando clipboard falha. Área usa imagem congelada.
+Portal Screenshot não interativo só com um monitor; outros casos usam PipeWire.
+Validação física de autorização e monitor no KDE permanece pendente.
+
+Seleção de área com edição sobre o monitor: barra flutuante com desenho, seta,
+formas, texto, destaque, máscara e desfoque; copiar/enviar exportam apenas o
+recorte composto. Testes cobrem não concluir ao selecionar, composição enviada
+aos dois destinos e preservação das anotações em falha de envio. Browser com
+imagem sintética confirmou seleção e seta; evidência /tmp/tinrec-print-overlay.png.
+Teste físico KDE/clipboard/Drive continua pendente.
+
+Correção da barra do print: posicionamento medido perto da seleção, limites laterais
+e margem inferior de 80px; fundo nativo opaco no print e transparente ao voltar
+a selecionar área de vídeo. Teste de geometria, build e Clippy passaram.
+A falha de repintura ao hover reportada no KDE exige confirmação nesse ambiente.
+
+Após regressão de tela branca reportada no KDE: revertida a troca do fundo nativo
+no print e removidas promoções de camada CSS. A janela area usa WebKitSettings
+hardware-acceleration-policy Never no Linux, antes de seu primeiro uso.
+Build/Clippy validam integração; não há confirmação visual nativa neste ambiente.
+
+Após persistência da falha: print-area passa a ser janela própria opaca desde
+a criação, com rota e capability dedicadas. A janela transparente area fica só
+para vídeo. Posição física reaplicada após tamanho; máscara por quatro retângulos
+substitui sombra de 99999px. 12 testes de seleção/overlay, builds e Clippy passam.
+A renderização nativa no KDE do usuário ainda não foi verificada.
+
+Visual do overlay de print alinhado ao mini menu de vídeo: paleta escura,
+botões de 36px, bordas, separadores e destaque azul para envio. Apenas CSS
+e classes de apresentação; janela opaca e posicionamento preservados.
+
+Prints configuram explicitamente CursorMode::Hidden. Removido o caminho Screenshot
+não interativo, que não permite exigir cursor oculto pela API usada. Vídeos
+preservam sua configuração. Compilação e testes de screenshots verificados;
+a ausência do ponteiro na captura física ainda exige teste por plataforma.
+
+Restauração de permissões Wayland compartilhada pelo motor de vídeo e screenshot:
+SessionBuilder recebe restore_token persistido e renova o token retornado. Arquivo
+local com modo 0600 e gravação atômica; falha ao persistir não bloqueia captura.
+Rejeição invalida token para próxima tentativa. Build/Clippy verificados; restauração
+real do KDE precisa ser confirmada com autorização concedida pelo usuário.
+
+Correção do modo Área: removida conversão de area para screen no Wayland.
+Gravação agora chama o seletor de área Tinrec em cada sessão. Tokens de monitor
+usam namespace novo para descartar escolhas antigas que podiam representar regiões.
+Botão de troca esquece as escolhas locais para a próxima captura nos dois modos.
+Portal ainda pode oferecer região; para seleção Tinrec deve-se autorizar monitor.
+Validação física do recorte e restauração KDE permanece necessária.
+
+Fluxo de fonte alinhado ao Cap: removido cache/restauração de tokens e botão de
+esquecer fonte; portal persist_mode=0. Wayland lista monitores via Tauri e codifica
+seus limites lógicos no alvo; backend valida posição/tamanho de stream antes de
+iniciar PipeWire. Rejeita região errada e monitores iguais em posições distintas.
+Campo Tela disponível nas duas plataformas; removidos overrides para auto.
+Área nova por padrão; fixar área de vídeo é opt-in e limitado ao monitor escolhido.
+31 testes React e 2 testes do backend de monitores passaram. Integração física
+KDE/Windows ainda não executada; não equivale a teste ponta a ponta nesses sistemas.
+
+Rollback solicitado: fluxo de captura anterior à mudança de cursor restaurado.
+Removidos validação de monitor no portal, fonte customizada, cache de autorização
+e área fixa. Screenshot não interativo com um monitor voltou; cursor usa padrão
+anterior. Vídeo Wayland usa seleção nativa do portal, sem segundo recorte.
+Mantidos identidade, biblioteca de prints e minimização da janela principal.
+
+Preferências de cópia local separadas: prints persistem decisão no backend para
+compartilhar com overlay; copiar não produz salvamento duplicado. Upload sem cópia
+local usa pending-prints e só remove após status uploaded. Caminhos de limpeza
+continuam restritos aos diretórios temporários. Nova gravação local usa Videos;
+lookup/listagem preservam arquivos antigos da raiz. Testes cobrem independência
+das opções, encaminhamento dos três atalhos e limpeza protegida após upload.

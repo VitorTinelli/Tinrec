@@ -37,7 +37,7 @@ No macOS, autorize o acesso à câmera quando solicitado; no Windows, habilite o
    para reproduzir a voz nos dois lados; o áudio do computador preserva seus canais.
 2. Ajuste os volumes antes de iniciar; 80% é o padrão. Fontes e volumes ficam
    bloqueados durante a gravação para evitar mudanças de formato.
-3. Clique em **Tela**, **Janela**, **Área** ou **Somente câmera** para iniciar.
+3. Clique em **Tela**, **Janela** ou **Área** para iniciar.
    Se faltar uma janela ou câmera, selecione a fonte e a gravação começa.
    No Wayland, escolha a fonte no diálogo do sistema.
    A escolha do dropdown não substitui a seleção pelo portal. Nos outros backends,
@@ -357,3 +357,38 @@ Execute o workflow manual **Windows installer** no GitHub Actions. O artefato `T
 No Linux, o gravador mantém **Tela**, **Janela** e **Área**, com seus respectivos atalhos. Em Wayland, a fonte final é escolhida no portal do compositor; no modo Área, o Tinrec usa diretamente o stream recebido, sem abrir outro recorte. As escolhas oferecidas dependem do compositor, e o portal não é tratado como se identificasse automaticamente uma região versus um monitor. Em X11, a seleção e o recorte do aplicativo continuam disponíveis.
 
 Windows e macOS mantêm Tela, Janela e Área. O backend macOS Pinray 0.2.7 usa SCContentFilter com tela/janela selecionadas por ID, sem SCContentSharingPicker; por isso, Área continua usando o recorte do Tinrec. Essa decisão foi conferida no código do backend e na documentação da Apple, sem executar macOS neste ambiente.
+
+## Prints
+
+No Gravador, use o seletor **Vídeo / Print** e clique em Tela, Janela ou Área.
+Os prints salvos ficam em **Prints**, no menu lateral. Para Área, selecione o recorte e use a barra flutuante sobre a captura para
+anotar, copiar ou enviar ao site. Não abre outra tela de edição. Copiar usa só
+o clipboard; enviar salva o PNG final na subpasta `Prints` e agenda o upload.
+Tela e Janela continuam com cópia e salvamento diretos. A tela Prints
+permite abrir o arquivo, enviar ao site ou abrir o link de um envio existente.
+Falhas no clipboard não apagam o PNG salvo.
+
+Os prints voltaram à política padrão de cursor e ao portal Screenshot em Wayland com um monitor.
+O sistema ainda pode solicitar autorização. Área mostra a captura congelada e
+termina ao soltar o mouse. Identificação ambígua de monitor recusa o recorte.
+Prints e gravações não são executados simultaneamente.
+
+## Seleção de fonte
+
+Fluxo restaurado ao estado anterior à remoção do ponteiro dos prints. No Wayland,
+o vídeo usa a fonte/região escolhida pelo portal do sistema. Para print com um
+monitor, usa Screenshot não interativo e a seleção/edição de área do Tinrec.
+Janela e múltiplos monitores usam captura nativa. Não há validação adicional de
+monitor, cache de autorização ou área fixa adicionados posteriormente.
+
+## Armazenamento separado
+
+Em Configurações, **Salvar vídeos no computador** e **Salvar prints no computador**
+são independentes. A pasta escolhida é a base Tinrec: novas gravações ficam em
+`Videos` e imagens em `Prints`. Vídeos antigos diretamente na base continuam na
+biblioteca; não são movidos ou apagados. Sem cópia local, vídeos e prints enviados
+ficam temporariamente na configuração do aplicativo até o upload terminar.
+Copiar print sem cópia local usa somente o clipboard.
+
+Atalhos configuráveis incluem **Print de tela**, **Print de janela** e **Print de
+área**. O antigo atalho de print continua associado à área.
