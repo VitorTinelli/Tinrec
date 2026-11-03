@@ -41,7 +41,11 @@ impl Microphone {
         };
         let config = device.default_input_config()?;
         let rate = config.sample_rate().0;
-        let (sender, receiver) = mpsc::sync_channel(32);
+        // WASAPI may deliver buffered callbacks in a burst after a scheduler
+        // stall. Keep a bounded Windows buffer comparable to the encoder queue;
+        // sustained overload still fails instead of silently dropping audio.
+        let capacity = if cfg!(target_os = "windows") { 256 } else { 32 };
+        let (sender, receiver) = mpsc::sync_channel(capacity);
         let failed = Arc::new(AtomicBool::new(false));
         let error_flag = failed.clone();
         let on_error = move |err| {

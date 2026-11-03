@@ -103,6 +103,35 @@ struct NativeClock {
     anchor: Option<(i64, Duration)>,
 }
 impl NativeClock {
+    fn for_capture(epoch: Instant) -> Result<Self> {
+        #[cfg(target_os = "windows")]
+        {
+            use windows_sys::Win32::System::Performance::{
+                QueryPerformanceCounter, QueryPerformanceFrequency,
+            };
+            let mut frequency = 0;
+            let mut counter = 0;
+            // DXGI, WGC and WASAPI timestamps share QPC. Anchor to QPC itself,
+            // never to receipt of a possibly buffered frame after device startup.
+            if unsafe { QueryPerformanceFrequency(&mut frequency) } == 0 || frequency <= 0 {
+                bail!("Não foi possível consultar a frequência do relógio de captura");
+            }
+            if unsafe { QueryPerformanceCounter(&mut counter) } == 0 {
+                bail!("Não foi possível consultar o relógio de captura");
+            }
+            let wall = epoch.elapsed();
+            let native = (i128::from(counter) * 1_000_000_000 / i128::from(frequency)) as i64;
+            Ok(Self {
+                anchor: Some((native, wall)),
+            })
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = epoch;
+            Ok(Self { anchor: None })
+        }
+    }
+
     fn map(&mut self, timestamp: i64, received: Duration) -> Duration {
         let (native, wall) = *self.anchor.get_or_insert((timestamp, received));
         let ns = (i128::from(timestamp) - i128::from(native) + wall.as_nanos() as i128)
@@ -670,7 +699,7 @@ fn run_inner(
     let mut tracks = Vec::new();
     let mut first_video = None;
     let mut first_audio = None;
-    let mut clock = NativeClock { anchor: None };
+    let mut clock = NativeClock::for_capture(epoch)?;
     let mut camera_clock = NativeClock { anchor: None };
     let dimensions = if let Some(native) = native.as_mut() {
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -1032,6 +1061,23 @@ fn synthetic_audio(index: u64, frequency: f64, channels: u16) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn qpc_capture_clock_does_not_shift_buffered_frames_to_arrival_time() {
+        let epoch = Instant::now();
+        let mut clock = NativeClock::for_capture(epoch).unwrap();
+        let (native, wall) = clock.anchor.unwrap();
+        let late_receipt = wall + Duration::from_secs(2);
+        assert_eq!(
+            clock.map(native + 50_000_000, late_receipt),
+            wall + Duration::from_millis(50)
+        );
+        assert_eq!(
+            clock.map(native - 500_000_000, late_receipt),
+            wall.saturating_sub(Duration::from_millis(500))
+        );
+    }
+
     #[test]
     fn preview_preserves_source_aspect_and_bgra_colors_without_upscaling() {
         let frame = preview_frame(&[10, 20, 30, 255].repeat(6), 3, 2).unwrap();

@@ -69,6 +69,10 @@ pub fn header(w: &mut impl Write, width: u32, height: u32, audio: &[AudioTrack])
             uint(&[0xd7], 1),
             uint(&[0x73, 0xc5], 1),
             uint(&[0x83], 1),
+            // Capture is capped at 30 Hz, but damage-driven frames may be sparse.
+            // Give the final frame a known duration instead of letting FFmpeg
+            // extend it by the preceding (possibly multi-second) frame gap.
+            uint(&[0x23, 0xe3, 0x83], 33_333_333),
             text(&[0x86], "V_MS/VFW/FOURCC"),
             element(&[0x63, 0xa2], &bitmap),
             master(

@@ -65,6 +65,9 @@ impl Encoder {
             "warning",
             "-nostdin",
             "-n",
+            // Packets already use the recording's host timeline. FFmpeg's
+            // default input offset would remove delayed device startup again.
+            "-copyts",
             "-f",
             "matroska",
             "-i",
@@ -235,5 +238,89 @@ impl Drop for Encoder {
         if let Some(writer) = self.writer.take() {
             let _ = writer.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires FFmpeg and ffprobe"]
+    fn sparse_video_final_frame_does_not_extend_the_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("still.mp4");
+        let encoder = Encoder::start(&output, Path::new("ffmpeg"), 64, 64, 720, &[], None).unwrap();
+        for pts_ms in [0, 1000, 3000, 3999] {
+            assert!(
+                encoder
+                    .send(Packet {
+                        track: 1,
+                        pts_ms,
+                        data: vec![0; 64 * 64 * 4],
+                    })
+                    .unwrap()
+            );
+        }
+        encoder.finish().unwrap();
+        let probe = crate::diagnostics::probe(Path::new("ffprobe"), &output).unwrap();
+        let checks = crate::diagnostics::check(&probe, 4.0, 0).unwrap();
+        assert!(checks.passed, "{checks:?}");
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg and ffprobe"]
+    fn delayed_stream_start_preserves_host_timeline_and_audio_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("delayed.mp4");
+        let tracks = [
+            AudioTrack {
+                number: 2,
+                rate: 48000,
+                channels: 2,
+                name: "System",
+            },
+            AudioTrack {
+                number: 3,
+                rate: 48000,
+                channels: 1,
+                name: "Microphone",
+            },
+        ];
+        let encoder =
+            Encoder::start(&output, Path::new("ffmpeg"), 64, 64, 720, &tracks, None).unwrap();
+        // Device initialization takes 1.5 seconds; microphone starts later.
+        for tick in 150..450u64 {
+            if tick % 10 == 0 {
+                let packet = Packet {
+                    track: 1,
+                    pts_ms: tick * 10,
+                    data: vec![0; 64 * 64 * 4],
+                };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while encoder.pending_video.load(Ordering::Relaxed) >= 4 {
+                    assert!(Instant::now() < deadline, "Encoder stalled during test");
+                    thread::sleep(Duration::from_millis(5));
+                }
+                assert!(encoder.send(packet).unwrap());
+            }
+            for track in tracks {
+                if track.number == 3 && tick < 180 {
+                    continue;
+                }
+                encoder
+                    .send(Packet {
+                        track: track.number,
+                        pts_ms: tick * 10,
+                        data: vec![0; 480 * usize::from(track.channels) * 4],
+                    })
+                    .unwrap();
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        encoder.finish().unwrap();
+        let probe = crate::diagnostics::probe(Path::new("ffprobe"), &output).unwrap();
+        let checks = crate::diagnostics::check(&probe, 4.5, 3).unwrap();
+        assert!(checks.passed, "{checks:?}");
     }
 }

@@ -1635,6 +1635,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
