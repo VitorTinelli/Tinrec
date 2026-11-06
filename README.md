@@ -1,16 +1,14 @@
 # Tinrec
 
-Gravador de tela e áudio com desktop Rust/Tauri, biblioteca privada e vídeos no Google Drive de cada usuário. O site usa R2 privado para reprodução temporária enquanto o Drive prepara seu player.
+Gravador de tela, áudio e prints com biblioteca privada e compartilhamento no Google Drive.
 
-**Estado: versão em validação.** O site está publicado em [tinrec.vercel.app](https://tinrec.vercel.app), com Google OAuth, Neon e R2 configurados. A captura real foi validada no Linux; os fluxos de interface, mute, descarte, retomada de upload e execução em segundo plano têm testes automatizados. A execução nativa em Windows/macOS ainda precisa de homologação.
+**Foco atual: Windows x64 com Rust/Tauri (0.3.0).** Entregas Linux/macOS e a implementação WPF ficam suspensas. Consulte [arquitetura e validação Windows](docs/WINDOWS-FOCUS.md).
 
-O [desktop Tauri](desktop-app/README.md) tem prévia da captura, mini menu flutuante, mute separado, descarte, conexão com Google e fila de upload retomável. Fechar no X mantém gravações e envios em segundo plano; a bandeja permite reabrir e sair.
+Instalador local: `artifacts/Tinrec-Setup-0.3.0-x64.exe`. Build: `./scripts/prepare-windows-ffmpeg.ps1`, `npm ci` e `npm run desktop:package -- --bundles nsis`. Artefatos locais não são versionados.
 
-No Linux deste ambiente, execute `./artifacts/Tinrec-linux-x64` (binário local não versionado). Para executar a partir do código, consulte os pré-requisitos do desktop e use `npm ci` e `npm run desktop:dev`. Veja a [validação da interface](desktop-app/VALIDATION.md), a [validação do motor](desktop-rust/VALIDATION.md) e a [configuração de produção](DEPLOYMENT.md).
+O site e os uploads continuam usando o Google Drive de cada usuário. Veja [DEPLOYMENT.md](DEPLOYMENT.md) e [TESTING.md](TESTING.md).
 
-O aplicativo Windows WPF original foi preservado e está descrito abaixo.
-
-## Aplicativo Windows original (WPF)
+## Histórico: aplicativo Windows original (WPF)
 
 Execute `artifacts/Tinrec-Setup-0.1.0-x64.exe` para instalar ou extraia `artifacts/Tinrec-Windows-x64.zip` e abra `Tinrec.exe`.
 
