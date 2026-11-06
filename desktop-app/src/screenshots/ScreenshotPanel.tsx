@@ -58,12 +58,16 @@ export function ScreenshotPanel({
       }
     };
   }, []);
+  const refreshRevision = useRef(0);
   const refresh = useCallback(async () => {
+    const revision = ++refreshRevision.current;
     try {
       const value = await call<PrintFile[]>("list_prints");
-      setFiles(value ?? []);
+      if (mounted.current && revision === refreshRevision.current)
+        setFiles(value ?? []);
     } catch (e) {
-      setError(message(e));
+      if (mounted.current && revision === refreshRevision.current)
+        setError(message(e));
     }
   }, []);
   useEffect(() => {
@@ -80,27 +84,26 @@ export function ScreenshotPanel({
         mode,
         display,
         window: windowId,
+        ...(mode === "area" ? {} : { action: "copy" }),
       });
-      if (mode === "area") {
-        await refresh();
-        return;
-      }
+      if (mode === "area") return;
       opened.current = true;
       const title = `Print - ${new Date().toLocaleString("pt-BR").replace(/[/:]/g, "-")}`;
-      await call("export_print", {
-        image: result.image,
-        title,
-        action: "copy",
-      });
+      if (result.image)
+        await call("export_print", {
+          image: result.image,
+          title,
+          action: "copy",
+        });
       if (mounted.current) setNotice("Print copiado.");
-      await refresh();
     } catch (e) {
       const text = message(e);
       if (!/cancel/i.test(text)) setError(text);
     } finally {
       opened.current = false;
       await call("close_print").catch(() => {});
-      setPending(false);
+      if (mounted.current) setPending(false);
+      void refresh();
     }
   }
   useEffect(() => {

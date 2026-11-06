@@ -1,7 +1,9 @@
+import { usePrintThickness } from "./usePrintThickness";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import {
   MousePointer2,
   ArrowUpRight,
+  ListOrdered,
   Minus,
   RectangleHorizontal,
   Circle,
@@ -23,6 +25,7 @@ import {
   dimensions,
   moveOperation,
   region,
+  nextArrowNumber,
   validateDocument,
   type Operation,
   type Point,
@@ -41,6 +44,7 @@ export interface PrintCapture {
 const tools: [Tool, string][] = [
   ["select", "Selecionar"],
   ["arrow", "Seta"],
+  ["numbered-arrow", "Seta numerada"],
   ["line", "Linha"],
   ["rectangle", "Retângulo"],
   ["ellipse", "Elipse"],
@@ -59,6 +63,7 @@ const tools: [Tool, string][] = [
 const toolIcons: Partial<Record<Tool, typeof Pencil>> = {
   select: MousePointer2,
   arrow: ArrowUpRight,
+  "numbered-arrow": ListOrdered,
   line: Minus,
   rectangle: RectangleHorizontal,
   ellipse: Circle,
@@ -76,6 +81,7 @@ const toolIcons: Partial<Record<Tool, typeof Pencil>> = {
 };
 const annotations = new Set<Tool>([
   "callout",
+  "numbered-arrow",
   "arrow",
   "line",
   "rectangle",
@@ -106,9 +112,9 @@ export function PrintEditor({
       operations: [],
     },
   );
-  const [tool, setTool] = useState<Tool>(capture.needsCrop ? "crop" : "arrow"),
+  const [tool, setTool] = useState<Tool>(capture.needsCrop ? "crop" : "select"),
     [color, setColor] = useState("#eb4960"),
-    [size, setSize] = useState(4),
+    [size, setSize] = usePrintThickness(1, 500),
     [font, setFont] = useState("Arial"),
     [filled, setFilled] = useState(false),
     [text, setText] = useState("Texto"),
@@ -138,6 +144,7 @@ export function PrintEditor({
       scale?: number;
       scaleY?: number;
     } | null>(null),
+    exportBusy = useRef(false),
     undo = useRef<Operation[][]>([]),
     redo = useRef<Operation[][]>([]),
     latest = useRef(doc),
@@ -307,6 +314,8 @@ export function PrintEditor({
     const op: Operation = {
       id: id(),
       tool,
+      number:
+        tool === "numbered-arrow" ? nextArrowNumber(doc.operations) : undefined,
       x: p.x,
       y: p.y,
       w: 0,
@@ -382,7 +391,7 @@ export function PrintEditor({
       h: p.y - active.start.y,
       points: drawing.points ? [...drawing.points, p] : undefined,
     };
-    if (!["line", "arrow", "pen", "highlight"].includes(tool))
+    if (!["line", "arrow", "numbered-arrow", "pen", "highlight"].includes(tool))
       op = {
         ...op,
         ...region(active.start, p, currentSize.width, currentSize.height),
@@ -403,7 +412,8 @@ export function PrintEditor({
     );
   }
   async function output(action: "copy" | "save" | "upload") {
-    if (pending) return;
+    if (pending || exportBusy.current) return;
+    exportBusy.current = true;
     setPending(true);
     setError("");
     try {
@@ -428,6 +438,7 @@ export function PrintEditor({
     } catch (e) {
       setError(message(e));
     } finally {
+      exportBusy.current = false;
       setPending(false);
     }
   }
@@ -478,7 +489,24 @@ export function PrintEditor({
   }
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if ((event.target as Element)?.closest("input,textarea,select")) return;
+      if (
+        event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        ["c", "s"].includes(event.key.toLowerCase())
+      ) {
+        event.preventDefault();
+        if (!pending && !event.repeat)
+          void output(event.key.toLowerCase() === "c" ? "copy" : "upload");
+        return;
+      }
+      if (pending) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest("input,textarea,select") &&
+        event.key !== "Escape"
+      )
+        return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         history(event.shiftKey ? "redo" : "undo");
@@ -490,6 +518,14 @@ export function PrintEditor({
         commit(doc.operations.filter((op) => op.id !== selected));
         setSelected(null);
       } else if (event.key === "Escape") {
+        event.preventDefault();
+        if (event.repeat) return;
+        if (tool === "select" && !selected && !draft && !picking) {
+          onClose();
+          return;
+        }
+        setTool("select");
+        setPicking(false);
         setSelected(null);
         setDraft(null);
         drag.current = null;
@@ -497,7 +533,23 @@ export function PrintEditor({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [doc, selected]);
+  }, [doc, selected, tool, draft, picking, pending, title, onClose, onSaved]);
+  useEffect(() => {
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      if (!pending && event.deltaY) {
+        const next = Math.max(
+          1,
+          Math.min(500, size + (event.deltaY < 0 ? 1 : -1)),
+        );
+        setSize(next);
+        updateSelected({ size: next });
+      }
+    };
+    window.addEventListener("wheel", wheel, { passive: false });
+    return () => window.removeEventListener("wheel", wheel);
+  }, [pending, size, doc, selected]);
   return (
     <section
       className="print-editor"
@@ -547,7 +599,7 @@ export function PrintEditor({
               aria-pressed={tool === value}
               disabled={pending}
               onClick={() => {
-                setTool(value);
+                setTool((current) => (current === value ? "select" : value));
                 setSelected(null);
                 setPicking(false);
               }}

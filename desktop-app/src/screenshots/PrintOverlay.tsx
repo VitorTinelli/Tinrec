@@ -1,18 +1,20 @@
+import { usePrintThickness } from "./usePrintThickness";
 import {
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type PointerEvent,
+  type ComponentType,
 } from "react";
 import {
   Pencil,
   ArrowUpRight,
+  GripVertical,
   Square,
   Circle,
   Type,
   Highlighter,
-  Blend,
   Undo2,
   Copy,
   Upload,
@@ -22,6 +24,7 @@ import {
 import { call, message, type Preview } from "../bridge";
 import {
   region,
+  nextArrowNumber,
   type Operation,
   type Point,
   type PrintDocument,
@@ -29,15 +32,70 @@ import {
 } from "./document";
 import { exportPng, renderDocument } from "./render";
 type Rect = { x: number; y: number; width: number; height: number };
-const tools: [Tool, string, typeof Pencil][] = [
+function BlurIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <rect
+        x="3"
+        y="4"
+        width="18"
+        height="16"
+        rx="2"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      {[7, 11, 15].map((y) => (
+        <g key={y} stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <path d={`M7 ${y}h3`} />
+          <path d={`M13 ${y}h1`} opacity=".45" />
+          <path d={`M17 ${y}h.1`} opacity=".2" />
+        </g>
+      ))}
+    </svg>
+  );
+}
+function NumberedArrowIcon({ size = 18 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 20 15 9m-6 0h6v6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="18" cy="6" r="5" fill="currentColor" />
+      <path
+        d="m17 4 1-1v6m-1 0h2"
+        stroke="#1b2130"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+const tools: [Tool, string, ComponentType<{ size?: number }>][] = [
   ["pen", "Desenhar", Pencil],
   ["arrow", "Seta", ArrowUpRight],
+  ["numbered-arrow", "Seta numerada", NumberedArrowIcon],
   ["rectangle", "Retângulo", Square],
   ["ellipse", "Elipse", Circle],
   ["text", "Texto", Type],
   ["highlight", "Destacar", Highlighter],
   ["fill", "Ocultar", Square],
-  ["blur", "Desfocar", Blend],
+  ["blur", "Desfocar", BlurIcon],
 ];
 export function PrintOverlay({
   preview,
@@ -48,16 +106,45 @@ export function PrintOverlay({
   onCancel: () => void;
   onDone: () => void;
 }) {
-  const [rect, setRect] = useState<Rect | null>(null),
+  const [rect, setRect] = useState<Rect | null>(
+      preview.initialSelection ?? null,
+    ),
     [ops, setOps] = useState<Operation[]>([]),
     [draft, setDraft] = useState<Operation | null>(null);
-  const [tool, setTool] = useState<Tool>("pen"),
+  const [tool, setTool] = useState<Tool | null>(null),
     [color, setColor] = useState("#ef4444"),
-    [size, setSize] = useState(4),
-    [text, setText] = useState("");
+    [size, setSize] = usePrintThickness(2, 12);
+  const [textEntry, setTextEntry] = useState<Operation | null>(null);
+  const textEntryRef = useRef<Operation | null>(null);
+  const textInput = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (textEntry) textInput.current?.focus();
+  }, [textEntry?.id]);
+  function commitText(id?: string) {
+    const entry = textEntryRef.current;
+    if (!entry || (id && entry.id !== id)) return;
+    if (entry.text?.trim()) setOps((current) => [...current, entry]);
+    textEntryRef.current = null;
+    setTextEntry(null);
+  }
   const [pending, setPending] = useState(false),
     [error, setError] = useState("");
   const toolbar = useRef<HTMLDivElement>(null);
+  const toolbarMoved = useRef(false);
+  const toolbarDrag = useRef<{ x: number; y: number } | null>(null);
+  function boundedToolbar(left: number, top: number) {
+    const menu = toolbar.current?.getBoundingClientRect();
+    return {
+      left: Math.max(
+        8,
+        Math.min(left, window.innerWidth - (menu?.width ?? 0) - 8),
+      ),
+      top: Math.max(
+        8,
+        Math.min(top, window.innerHeight - (menu?.height ?? 0) - 8),
+      ),
+    };
+  }
   const [toolbarPosition, setToolbarPosition] = useState({ left: 16, top: 16 });
   useLayoutEffect(() => {
     if (!rect || !toolbar.current || !surface.current) return;
@@ -70,6 +157,12 @@ export function PrintOverlay({
       const safeBottom = Math.max(16, window.innerHeight - menu.height - 80);
       const below = bottom + 12;
       const above = y - menu.height - 12;
+      if (toolbarMoved.current) {
+        setToolbarPosition((position) =>
+          boundedToolbar(position.left, position.top),
+        );
+        return;
+      }
       setToolbarPosition({
         left: Math.max(16, Math.min(x, window.innerWidth - menu.width - 16)),
         top: Math.max(
@@ -96,7 +189,8 @@ export function PrintOverlay({
     origin = useRef<Point | null>(null),
     drawing = useRef<Operation | null>(null),
     selection = useRef<Rect | null>(null),
-    busy = useRef(false);
+    busy = useRef(false),
+    readySession = useRef<string | null>(null);
   const doc = (operations = ops): PrintDocument => ({
     version: 1,
     source: preview.image,
@@ -121,27 +215,69 @@ export function PrintOverlay({
   useEffect(() => {
     if (!rect) return;
     let active = true;
-    void renderDocument(doc(draft ? [...ops, draft] : ops))
-      .then((image) => {
-        if (!active || !canvas.current) return;
-        canvas.current.width = image.width;
-        canvas.current.height = image.height;
-        canvas.current.getContext("2d")?.drawImage(image, 0, 0);
-      })
-      .catch((e) => {
-        if (active) setError(message(e));
-      });
+    let painted = 0;
+    const frame = requestAnimationFrame(() => {
+      void renderDocument(doc(draft ? [...ops, draft] : ops))
+        .then((image) => {
+          if (!active || !canvas.current) return;
+          canvas.current.width = image.width;
+          canvas.current.height = image.height;
+          canvas.current.getContext("2d")?.drawImage(image, 0, 0);
+          if (
+            preview.image.startsWith("http://tinrec-print.localhost/") &&
+            readySession.current !== preview.sessionId
+          ) {
+            painted = requestAnimationFrame(() => {
+              readySession.current = preview.sessionId;
+              void call("print_editor_ready", {
+                sessionId: preview.sessionId,
+              }).catch(() => {});
+            });
+          }
+        })
+        .catch((e) => {
+          if (active) setError(message(e));
+        });
+    });
     return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(painted);
       active = false;
     };
   }, [rect, ops, draft, preview]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy.current) onCancel();
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (busy.current || e.repeat) return;
+        if (textEntryRef.current) {
+          textEntryRef.current = null;
+          setTextEntry(null);
+          return;
+        }
+        origin.current = null;
+        drawing.current = null;
+        setDraft(null);
+        if (tool) setTool(null);
+        else onCancel();
+        return;
+      }
+      if (
+        e.ctrlKey &&
+        !e.altKey &&
+        !e.shiftKey &&
+        ["c", "s"].includes(e.key.toLowerCase())
+      ) {
+        e.preventDefault();
+        if (!e.repeat && !busy.current && rect)
+          void finish(e.key.toLowerCase() === "c" ? "copy" : "upload");
+        return;
+      }
       if (
         (e.ctrlKey || e.metaKey) &&
         e.key === "z" &&
-        !(e.target instanceof HTMLInputElement)
+        !(e.target instanceof HTMLInputElement) &&
+        !(e.target instanceof HTMLTextAreaElement)
       ) {
         e.preventDefault();
         setOps((v) => v.slice(0, -1));
@@ -149,7 +285,19 @@ export function PrintOverlay({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [onCancel]);
+  }, [onCancel, onDone, tool, rect, ops, color, size]);
+  useEffect(() => {
+    const wheel = (event: WheelEvent) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      if (!busy.current && event.deltaY)
+        setSize((value) =>
+          Math.max(2, Math.min(12, value + (event.deltaY < 0 ? 1 : -1))),
+        );
+    };
+    window.addEventListener("wheel", wheel, { passive: false });
+    return () => window.removeEventListener("wheel", wheel);
+  }, []);
   function point(event: PointerEvent) {
     const b = surface.current!.getBoundingClientRect();
     return {
@@ -170,7 +318,7 @@ export function PrintOverlay({
     };
   }
   function begin(event: PointerEvent<HTMLDivElement>) {
-    if (pending || event.button !== 0) return;
+    if (pending || event.button !== 0 || (rect && !tool)) return;
     const p = point(event);
     if (
       rect &&
@@ -180,6 +328,23 @@ export function PrintOverlay({
         p.y > rect.y + rect.height)
     )
       return;
+    if (rect && tool === "text") {
+      commitText();
+      const entry: Operation = {
+        id: crypto.randomUUID(),
+        tool: "text",
+        x: p.x - rect.x,
+        y: p.y - rect.y,
+        w: 0,
+        h: 0,
+        text: "",
+        size: Math.max(18, size * 5),
+        color,
+      };
+      textEntryRef.current = entry;
+      setTextEntry(entry);
+      return;
+    }
     origin.current = rect ? { x: p.x - rect.x, y: p.y - rect.y } : p;
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -190,7 +355,8 @@ export function PrintOverlay({
       const a = origin.current;
       drawing.current = {
         id: crypto.randomUUID(),
-        tool,
+        tool: tool!,
+        number: tool === "numbered-arrow" ? nextArrowNumber(ops) : undefined,
         x: a.x,
         y: a.y,
         w: 0,
@@ -198,7 +364,6 @@ export function PrintOverlay({
         points: tool === "pen" || tool === "highlight" ? [a] : undefined,
         color,
         size: tool === "text" ? Math.max(18, size * 5) : size,
-        text,
         filled: tool === "fill",
       };
       setDraft(drawing.current);
@@ -222,7 +387,7 @@ export function PrintOverlay({
     const op = drawing.current;
     drawing.current = {
       ...op,
-      ...(tool === "arrow"
+      ...(tool === "arrow" || tool === "numbered-arrow"
         ? { w: b.x - a.x, h: b.y - a.y }
         : tool === "pen" || tool === "highlight"
           ? { points: [...(op.points ?? []), b] }
@@ -238,7 +403,7 @@ export function PrintOverlay({
     if (!rect) {
       const r = selection.current;
       if (r && r.width >= 2 && r.height >= 2) setRect(r);
-    } else if (drawing.current && (tool !== "text" || text.trim())) {
+    } else if (drawing.current) {
       const op = drawing.current;
       setOps((v) => [...v, op]);
     }
@@ -252,14 +417,20 @@ export function PrintOverlay({
     setPending(true);
     setError("");
     try {
-      const image = await exportPng(doc());
-      await call("export_print", {
-        image,
-        title: `Print - ${new Date().toLocaleString("pt-BR").replace(/[/:]/g, "-")}`,
-        action,
-      });
+      const title = `Print - ${new Date().toLocaleString("pt-BR").replace(/[/:]/g, "-")}`;
+      const entry = textEntryRef.current;
+      const finalOps = entry?.text?.trim() ? [...ops, entry] : ops;
+      if (!finalOps.length) {
+        await call("export_print_selection", {
+          request: { sessionId: preview.sessionId, rect, title, action },
+        });
+      } else {
+        const image = await exportPng(doc(finalOps));
+        await call("export_print", { image, title, action });
+      }
       await call("select_print_area", {
         sessionId: preview.sessionId,
+        returnImage: false,
         ...rect,
       });
       onDone();
@@ -344,6 +515,41 @@ export function PrintOverlay({
           </div>
         )}
       </div>
+      {rect && textEntry && (
+        <textarea
+          key={textEntry.id}
+          ref={textInput}
+          className="print-inline-text"
+          aria-label="Texto da anotação"
+          placeholder="Digite aqui"
+          value={textEntry.text ?? ""}
+          rows={Math.min(8, (textEntry.text ?? "").split("\n").length)}
+          style={{
+            left: `${((rect.x + textEntry.x) / preview.sourceWidth) * 100}%`,
+            top: `${((rect.y + textEntry.y) / preview.sourceHeight) * 100}%`,
+            width: `${(Math.min(360, rect.width - textEntry.x) / preview.sourceWidth) * 100}%`,
+            maxHeight: `${((rect.height - textEntry.y) / preview.sourceHeight) * 100}%`,
+            fontSize: `${(textEntry.size / preview.sourceWidth) * 100}vw`,
+            color: textEntry.color,
+          }}
+          onChange={(event) => {
+            const entry = { ...textEntry, text: event.target.value };
+            textEntryRef.current = entry;
+            setTextEntry(entry);
+          }}
+          onBlur={() => commitText(textEntry.id)}
+          onKeyDown={(event) => {
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing
+            ) {
+              event.preventDefault();
+              commitText(textEntry.id);
+            }
+          }}
+        />
+      )}
       {rect && (
         <div
           ref={toolbar}
@@ -353,16 +559,86 @@ export function PrintOverlay({
           aria-label="Ferramentas do print"
           aria-busy={pending}
         >
+          <button
+            className="print-toolbar-grip"
+            title="Arraste para mover a barra (ou use as setas do teclado)"
+            aria-label="Mover barra de ferramentas"
+            disabled={pending}
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              toolbarMoved.current = true;
+              const bounds = toolbar.current!.getBoundingClientRect();
+              toolbarDrag.current = {
+                x: event.clientX - bounds.left,
+                y: event.clientY - bounds.top,
+              };
+              try {
+                event.currentTarget.setPointerCapture(event.pointerId);
+              } catch {
+                /* Synthetic input */
+              }
+            }}
+            onPointerMove={(event) => {
+              if (!toolbarDrag.current) return;
+              setToolbarPosition(
+                boundedToolbar(
+                  event.clientX - toolbarDrag.current.x,
+                  event.clientY - toolbarDrag.current.y,
+                ),
+              );
+            }}
+            onPointerUp={() => {
+              toolbarDrag.current = null;
+            }}
+            onPointerCancel={() => {
+              toolbarDrag.current = null;
+            }}
+            onLostPointerCapture={() => {
+              toolbarDrag.current = null;
+            }}
+            onKeyDown={(event) => {
+              const directions: Record<string, [number, number]> = {
+                ArrowLeft: [-1, 0],
+                ArrowRight: [1, 0],
+                ArrowUp: [0, -1],
+                ArrowDown: [0, 1],
+              };
+              const direction = directions[event.key];
+              if (!direction) return;
+              event.preventDefault();
+              toolbarMoved.current = true;
+              const step = event.shiftKey ? 24 : 8;
+              setToolbarPosition((position) =>
+                boundedToolbar(
+                  position.left + direction[0] * step,
+                  position.top + direction[1] * step,
+                ),
+              );
+            }}
+          >
+            <GripVertical size={16} />
+          </button>
           {tools.map(([value, label, Icon]) => (
             <button
               key={value}
-              title={label}
+              title={
+                value === "blur"
+                  ? "Desfocar: arraste sobre textos ou detalhes da imagem"
+                  : value === "fill"
+                    ? "Ocultar: cubra uma área com uma cor sólida"
+                    : label
+              }
               aria-label={label}
+              className={value === "fill" ? "print-fill-tool" : undefined}
               aria-pressed={tool === value}
               disabled={pending}
-              onClick={() => setTool(value)}
+              onClick={() =>
+                setTool((current) => (current === value ? null : value))
+              }
             >
-              <Icon size={18} />
+              <Icon size={17} />
+              {value === "blur" && <span>Desfocar</span>}
             </button>
           ))}
           <span className="print-toolbar-divider" aria-hidden="true" />
@@ -382,15 +658,6 @@ export function PrintOverlay({
             disabled={pending}
             onChange={(e) => setSize(Number(e.target.value))}
           />
-          {tool === "text" && (
-            <input
-              aria-label="Texto da anotação"
-              placeholder="Digite e clique na imagem"
-              value={text}
-              disabled={pending}
-              onChange={(e) => setText(e.target.value)}
-            />
-          )}
           <button
             title="Desfazer"
             aria-label="Desfazer"
@@ -414,19 +681,22 @@ export function PrintOverlay({
           <span className="print-toolbar-divider" aria-hidden="true" />
           <button
             className="print-copy"
+            title="Copiar (Ctrl+C)"
+            aria-label="Copiar"
             disabled={pending}
             onClick={() => void finish("copy")}
           >
             <Copy size={18} />
-            Copiar
           </button>
           <button
             className="print-upload"
+            title="Enviar ao site (Ctrl+S)"
+            aria-label="Enviar ao site"
             disabled={pending}
             onClick={() => void finish("upload")}
           >
             <Upload size={18} />
-            Enviar ao site
+            <span>Enviar</span>
           </button>
           <button
             className="print-cancel"

@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PrintEditor } from "./PrintEditor";
 import { call } from "../bridge";
@@ -22,6 +28,7 @@ const capture = {
   needsCrop: false,
 };
 beforeEach(() => {
+  localStorage.clear();
   vi.clearAllMocks();
   vi.stubGlobal("PointerEvent", MouseEvent);
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
@@ -97,4 +104,38 @@ it("undo and redo alter the document that is actually exported", async () => {
       operations: [expect.objectContaining({ tool: "text" })],
     }),
   );
+});
+
+it("uses local print keys and clears the tool before Escape closes the editor", async () => {
+  const close = vi.fn();
+  render(<PrintEditor capture={capture} onClose={close} onSaved={() => {}} />);
+  await userEvent.click(screen.getByRole("button", { name: "Seta numerada" }));
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(close).not.toHaveBeenCalled();
+  expect(
+    screen
+      .getByRole("button", { name: "Seta numerada" })
+      .getAttribute("aria-pressed"),
+  ).toBe("false");
+  const size = screen.getByRole("spinbutton", { name: /Tamanho/ });
+  fireEvent.wheel(window, { ctrlKey: true, deltaY: -100 });
+  expect(size).toHaveProperty("value", "5");
+  fireEvent.keyDown(window, { ctrlKey: true, key: "c" });
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith(
+      "export_print",
+      expect.objectContaining({ action: "copy" }),
+    ),
+  );
+  await screen.findByText("Imagem copiada.");
+  fireEvent.keyDown(window, { ctrlKey: true, key: "s" });
+  await waitFor(() =>
+    expect(call).toHaveBeenCalledWith(
+      "export_print",
+      expect.objectContaining({ action: "upload" }),
+    ),
+  );
+  await screen.findByText("Print na fila de envio.");
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(close).toHaveBeenCalledOnce();
 });
