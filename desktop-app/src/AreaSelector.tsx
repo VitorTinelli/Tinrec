@@ -39,12 +39,16 @@ export function AreaSelector({
   enabled,
   onCancel,
   selectionCommand = "select_area",
+  initialPreview,
+  keepSelection = false,
   onSelected,
 }: {
   snapshot: Snapshot;
   enabled: boolean;
   onCancel: () => void;
   selectionCommand?: string;
+  initialPreview?: Preview;
+  keepSelection?: boolean;
   onSelected?: () => void;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -65,6 +69,10 @@ export function AreaSelector({
     setSubmitted(false);
     setError(null);
     if (!enabled || snapshot.phase !== "starting") return;
+    if (initialPreview && initialPreview.sessionId === snapshot.sessionId) {
+      setPreview(initialPreview);
+      return;
+    }
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const accept = (value: Preview | null) => {
@@ -91,16 +99,31 @@ export function AreaSelector({
       disposed = true;
       unlisten?.();
     };
-  }, [enabled, snapshot.sessionId, snapshot.phase, selectionCommand]);
+  }, [
+    enabled,
+    snapshot.sessionId,
+    snapshot.phase,
+    selectionCommand,
+    initialPreview,
+  ]);
   const visible =
-    !!preview && snapshot.phase === "starting" && !submitted && enabled;
+    !!preview &&
+    snapshot.phase === "starting" &&
+    (!submitted || keepSelection) &&
+    enabled;
   useEffect(() => {
     const cancel = (event: KeyboardEvent) => {
-      if (visible && event.key === "Escape" && !pending) onCancel();
+      if (
+        visible &&
+        selectionCommand !== "select_print_area" &&
+        event.key === "Escape" &&
+        !pending
+      )
+        onCancel();
     };
     window.addEventListener("keydown", cancel);
     return () => window.removeEventListener("keydown", cancel);
-  }, [onCancel, pending, visible]);
+  }, [onCancel, pending, visible, selectionCommand]);
   const point = (event: PointerEvent<HTMLDivElement>): Point => {
     const bounds = event.currentTarget.getBoundingClientRect();
     return {
@@ -165,7 +188,7 @@ export function AreaSelector({
               : undefined
           }
           onPointerDown={(event) => {
-            if (pending || event.button !== 0) return;
+            if (pending || submitted || event.button !== 0) return;
             const value = point(event);
             origin.current = value;
             dragging.current = true;

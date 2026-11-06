@@ -39,11 +39,32 @@ it("captura a combinação, aplica pelo backend e permite removê-la", async () 
     ctrlKey: true,
     shiftKey: true,
   });
-  expect(start).toHaveProperty("value", "Ctrl+Shift+KeyR");
+  expect(start).toHaveProperty("value", "Ctrl+Shift+R");
+  const pause = screen.getByRole("textbox", {
+    name: "Atalho: Pausar ou retomar",
+  });
+  await user.click(pause);
+  expect(pause).toHaveProperty("value", "");
+  fireEvent.keyDown(pause, { key: "F5", code: "F5" });
+  expect(pause).toHaveProperty("value", "F5");
+  const show = screen.getByRole("textbox", { name: "Atalho: Abrir gravador" });
+  await user.click(show);
+  fireEvent.keyDown(show, { key: "q", code: "KeyQ" });
+  expect(show).toHaveProperty("value", "Q");
+  const stop = screen.getByRole("textbox", { name: "Atalho: Parar e salvar" });
+  await user.click(stop);
+  expect(stop).toHaveProperty("value", "");
+  fireEvent.mouseDown(stop, { button: 3, ctrlKey: true });
+  expect(stop).toHaveProperty("value", "Ctrl+MouseX1");
   await user.click(screen.getByRole("button", { name: "Salvar atalhos" }));
   await screen.findByText("Atalhos salvos.");
   expect(call).toHaveBeenCalledWith("save_shortcuts", {
-    bindings: { start: "Ctrl+Shift+KeyR" },
+    bindings: {
+      start: "Ctrl+Shift+R",
+      pause: "F5",
+      show: "Q",
+      stop: "Ctrl+MouseX1",
+    },
   });
   await user.click(
     screen.getByRole("button", { name: "Remover atalho: Iniciar gravação" }),
@@ -52,7 +73,7 @@ it("captura a combinação, aplica pelo backend e permite removê-la", async () 
   await user.click(screen.getByRole("button", { name: "Salvar atalhos" }));
   await waitFor(() =>
     expect(call).toHaveBeenCalledWith("save_shortcuts", {
-      bindings: { start: "" },
+      bindings: { start: "", pause: "F5", show: "Q", stop: "Ctrl+MouseX1" },
     }),
   );
 });

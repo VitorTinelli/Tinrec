@@ -106,3 +106,25 @@ it("Gaussian approximation smooths contrast while preserving opacity", () => {
   expect(data[0]).toBeGreaterThan(0);
   expect([data[3], data[7], data[11]]).toEqual([255, 255, 255]);
 });
+
+it("preserves numbered arrows in projects and includes the badge in selection bounds", () => {
+  const arrow = operation("numbered-arrow", {
+    x: 100,
+    y: 100,
+    w: -80,
+    h: 40,
+    number: 12,
+  });
+  const project = doc([arrow]);
+  expect(
+    validateDocument(JSON.parse(JSON.stringify(project))).operations[0].number,
+  ).toBe(12);
+  expect(annotationBounds(project, 0)).toMatchObject({
+    x: 20,
+    y: 84,
+    w: 96,
+    h: 56,
+  });
+  expect(() => validateDocument(doc([{ ...arrow, number: 0 }]))).toThrow();
+  expect(() => validateDocument(doc([{ ...arrow, number: NaN }]))).toThrow();
+});

@@ -3,7 +3,7 @@ use tauri::Manager;
 fn dispatch(app: &tauri::AppHandle, action: &str) {
     let result = match action {
         "open" => crate::show_recorder(app.clone()),
-        "folder" => crate::open_folder(app.clone(), app.state::<crate::Shared>()),
+        "folder" => crate::library::open_folder(app.clone(), app.state::<crate::Shared>()),
         "quit" => crate::request_exit(app),
         _ => Ok(()),
     };

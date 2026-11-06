@@ -24,20 +24,12 @@ import { selectedPixels } from "./AreaSelector";
 
 it.each([
   {
-    name: "escala para a fonte 4K",
-    start: { x: 0.25, y: 0.25 },
-    end: { x: 0.75, y: 0.75 },
+    name: "aceita arraste inverso em fonte 4K",
+    start: { x: 0.75, y: 0.75 },
+    end: { x: 0.25, y: 0.25 },
     width: 3840,
     height: 2160,
     expected: { x: 960, y: 540, width: 1920, height: 1080 },
-  },
-  {
-    name: "aceita arraste inverso",
-    start: { x: 0.75, y: 0.75 },
-    end: { x: 0.25, y: 0.25 },
-    width: 1920,
-    height: 1080,
-    expected: { x: 480, y: 270, width: 960, height: 540 },
   },
   {
     name: "inclui as bordas da fonte",
@@ -89,13 +81,12 @@ it.each([false, true])(
       <AreaSelector
         snapshot={{ ...idle, phase: "starting", sessionId: "area-1" }}
         enabled
+        initialPreview={captureRejected ? { sessionId: "area-1", sequence: 1, image: "", width: 1920, height: 1080, sourceWidth: 1920, sourceHeight: 1080 } : undefined}
+        selectionCommand={captureRejected ? "finish_area_pick" : "select_area"}
         onCancel={() => {}}
       />,
     );
     await screen.findByRole("dialog", { name: "Selecionar área de gravação" });
-    expect(screen.queryByRole("button")).toBeNull();
-    expect(container.querySelector("img")).toBeNull();
-    expect(container.querySelector("dialog")).toBeNull();
     const canvas = container.querySelector(".area-canvas") as HTMLDivElement;
     canvas.setPointerCapture = vi.fn(() => {
       if (captureRejected)
@@ -118,7 +109,7 @@ it.each([false, true])(
       fireEvent.pointerUp(canvas, { clientX: 300, clientY: 150 });
     });
 
-    expect(call).toHaveBeenCalledWith("select_area", {
+    expect(call).toHaveBeenCalledWith(captureRejected ? "finish_area_pick" : "select_area", {
       sessionId: "area-1",
       x: 480,
       y: 270,

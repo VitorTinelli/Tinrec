@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "useLocalToolsDir": true,
     "resources": {
       "resources/windows/bin/ffmpeg.exe": "bin/ffmpeg.exe",
       "resources/windows/bin/ffprobe.exe": "bin/ffprobe.exe",

@@ -117,7 +117,12 @@ export function size(bytes: number): string {
     : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 }
 
+export interface AreaSelection {
+  display: string; sourceWidth: number; sourceHeight: number;
+  x: number; y: number; width: number; height: number;
+}
 export interface Preview {
+  initialSelection?: { x: number; y: number; width: number; height: number };
   sessionId: string;
   sequence: number;
   image: string;

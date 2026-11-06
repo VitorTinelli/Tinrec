@@ -206,6 +206,20 @@ impl Cloud {
             "O link deste vídeo ainda está sendo preparado. Tente novamente em instantes.".into(),
         )
     }
+    pub fn page_url(&self, id: &str) -> Reply<Option<String>> {
+        let i = lock(&self.inner)?;
+        let account = &i.auth.as_ref().ok_or("Conta desconectada")?.account;
+        let job = i
+            .saved
+            .jobs
+            .iter()
+            .find(|j| j.id == id && &j.account == account)
+            .ok_or("A conta do envio foi desconectada ou alterada")?;
+        if matches!(job.status.as_str(), "failed" | "discarded") {
+            return Err("O envio falhou ou foi descartado".into());
+        }
+        Ok(job.url.clone())
+    }
     pub fn reserved_url(&self, path: &Path) -> Reply<Option<String>> {
         let i = lock(&self.inner)?;
         let account = &i
@@ -286,21 +300,22 @@ impl Cloud {
         resolution: u32,
         duration: f64,
         recording: bool,
-    ) -> Reply<()> {
+    ) -> Reply<String> {
         let mut i = lock(&self.inner)?;
         let Some(auth) = i.auth.clone() else {
             return Err("Conecte sua conta Google para enviar o vídeo.".into());
         };
-        if i.saved
+        if let Some(existing) = i
+            .saved
             .jobs
             .iter()
-            .any(|j| j.path == path && j.account == auth.account && j.status != "failed")
+            .find(|j| j.path == path && j.account == auth.account && j.status != "failed")
         {
-            return Ok(());
+            return Ok(existing.id.clone());
         }
         let image = path.extension().is_some_and(|extension| extension == "png");
         i.saved.jobs.push(Job {
-            id,
+            id: id.clone(),
             file_name: path
                 .file_name()
                 .unwrap_or_default()
@@ -323,7 +338,11 @@ impl Cloud {
             attempts: 0,
             next_retry: 0,
         });
-        self.persist(&i)
+        if let Err(error) = self.persist(&i) {
+            i.saved.jobs.pop();
+            return Err(error);
+        }
+        Ok(id)
     }
     pub fn remove_local_after_upload(&self, id: &str) -> Reply<()> {
         let mut i = lock(&self.inner)?;
@@ -877,6 +896,29 @@ mod tests {
         (reader, bytes, range)
     }
     #[test]
+    fn failed_queue_persistence_does_not_leave_a_phantom_job() {
+        let (c, dir) = test_cloud();
+        authenticate(&c, "owner");
+        fs::remove_file(&c.file).unwrap();
+        fs::create_dir(&c.file).unwrap();
+        let path = dir.join("print.png");
+        fs::write(&path, b"png").unwrap();
+        assert!(
+            c.enqueue(
+                "print".into(),
+                path.clone(),
+                "Print".into(),
+                1080,
+                0.,
+                false
+            )
+            .is_err()
+        );
+        assert!(c.inner.lock().unwrap().saved.jobs.is_empty());
+        assert!(path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
     fn restrict_upload_destination() {
         assert!(
             validate_uri("https://www.googleapis.com/upload/drive/v3/files?upload_id=x").is_ok()
@@ -1015,44 +1057,67 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn print_page_waits_for_reservation_and_reuses_existing_upload() {
+    fn page_links_survive_file_removal_and_remain_bound_to_job_and_account() {
         let (c, dir) = test_cloud();
         authenticate(&c, "owner");
-        let path = dir.join("pending-prints").join("print.png");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let path = dir.join("print.png");
         fs::write(&path, b"png").unwrap();
-        c.enqueue(
-            "print".into(),
-            path.clone(),
-            "Print".into(),
-            1080,
-            0.,
-            false,
-        )
-        .unwrap();
-        assert_eq!(c.reserved_url(&path).unwrap(), None);
-        c.enqueue(
-            "duplicate".into(),
-            path.clone(),
-            "Print".into(),
-            1080,
-            0.,
-            false,
-        )
-        .unwrap();
-        {
-            let mut i = c.inner.lock().unwrap();
-            assert_eq!(i.saved.jobs.len(), 1);
-            i.saved.jobs[0].url = Some(format!("{SITE}/v/print"));
-        }
-        // Temporary files can be removed after upload before the opener runs.
-        fs::remove_file(&path).unwrap();
+        let id = c
+            .enqueue(
+                "original".into(),
+                path.clone(),
+                "Print".into(),
+                1080,
+                0.,
+                false,
+            )
+            .unwrap();
+        assert_eq!(id, "original");
         assert_eq!(
-            c.reserved_url(&path).unwrap(),
-            Some(format!("{SITE}/v/print"))
+            c.enqueue(
+                "duplicate".into(),
+                path.clone(),
+                "Print".into(),
+                1080,
+                0.,
+                false
+            )
+            .unwrap(),
+            id
         );
+        assert_eq!(c.page_url(&id).unwrap(), None);
+        assert_eq!(c.reserved_url(&path).unwrap(), None);
+        assert_eq!(c.inner.lock().unwrap().saved.jobs.len(), 1);
         authenticate(&c, "another");
         assert!(c.reserved_url(&path).is_err());
+        let other = c
+            .enqueue(
+                "other".into(),
+                path.clone(),
+                "Print".into(),
+                1080,
+                0.,
+                false,
+            )
+            .unwrap();
+        assert!(c.page_url(&id).is_err());
+        assert_eq!(c.page_url(&other).unwrap(), None);
+        authenticate(&c, "owner");
+        {
+            let mut i = c.inner.lock().unwrap();
+            i.saved.jobs[0].url = Some(format!("{SITE}/v/original"));
+        }
+        fs::remove_file(&path).unwrap();
+        assert_eq!(c.page_url(&id).unwrap(), Some(format!("{SITE}/v/original")));
+        assert_eq!(
+            c.reserved_url(&path).unwrap(),
+            Some(format!("{SITE}/v/original"))
+        );
+        c.inner.lock().unwrap().auth = None;
+        assert!(c.page_url(&id).is_err());
+        authenticate(&c, "owner");
+        c.inner.lock().unwrap().saved.jobs[0].status = "failed".into();
+        assert!(c.page_url(&id).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

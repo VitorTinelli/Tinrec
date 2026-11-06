@@ -19,13 +19,20 @@ use tauri_plugin_opener::OpenerExt;
 #[derive(Default)]
 pub struct Prints {
     pub busy: AtomicBool,
+    capturing: AtomicBool,
+    cancelled: AtomicBool,
+    editor: Mutex<Option<String>>,
+    bitmap: Mutex<Option<(String, std::sync::Arc<Vec<u8>>)>>,
     area: Mutex<Option<PrintArea>>,
     #[cfg(target_os = "linux")]
     portal_ready: AtomicBool,
 }
 struct PrintArea {
+    source: std::sync::Arc<image::DynamicImage>,
+    prepared: Instant,
+    ready: bool,
     preview: crate::Preview,
-    sender: mpsc::Sender<Option<pinray::Rect>>,
+    sender: mpsc::Sender<Option<(pinray::Rect, bool)>>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +78,13 @@ fn decode(bytes: &[u8]) -> Reply<image::DynamicImage> {
     }
     Ok(image)
 }
+fn validated_export_png(bytes: Vec<u8>) -> Reply<(image::DynamicImage, Vec<u8>)> {
+    if image::guess_format(&bytes).ok() != Some(image::ImageFormat::Png) {
+        return Err("Formato de imagem inválido: esperado PNG".into());
+    }
+    let decoded = decode(&bytes)?;
+    Ok((decoded, bytes))
+}
 fn png(image: &image::DynamicImage) -> Reply<Vec<u8>> {
     let mut bytes = Cursor::new(Vec::new());
     image
@@ -81,6 +95,29 @@ fn png(image: &image::DynamicImage) -> Reply<Vec<u8>> {
         return Err("PNG acima do limite de 80 MiB.".into());
     }
     Ok(bytes)
+}
+fn preview_png(image: &image::DynamicImage) -> Reply<Vec<u8>> {
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    let mut bytes = Vec::new();
+    // A fixed lossless filter avoids evaluating every PNG filter for every row.
+    PngEncoder::new_with_quality(&mut bytes, CompressionType::Fast, FilterType::Sub)
+        .write_image(
+            image.as_bytes(),
+            image.width(),
+            image.height(),
+            image.color().into(),
+        )
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 80 * 1024 * 1024 {
+        return Err("PNG acima do limite de 80 MiB.".into());
+    }
+    Ok(bytes)
+}
+fn encoded_preview(image: &image::DynamicImage) -> Reply<String> {
+    Ok(format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(preview_png(image)?)
+    ))
 }
 fn encoded(image: &image::DynamicImage) -> Reply<String> {
     Ok(format!(
@@ -112,6 +149,7 @@ async fn portal_frame() -> Reply<image::DynamicImage> {
     .await
     .map_err(|e| e.to_string())?
 }
+#[cfg(any(not(target_os = "windows"), test))]
 fn print_display(wayland: bool, display: String) -> String {
     if wayland && display == "auto" {
         "print-monitor".to_string()
@@ -119,7 +157,12 @@ fn print_display(wayland: bool, display: String) -> String {
         display
     }
 }
-fn native_frame(mode: &str, display: &str, window: &str) -> Reply<image::DynamicImage> {
+fn native_frame(
+    mode: &str,
+    display: &str,
+    window: &str,
+    cancelled: &AtomicBool,
+) -> Reply<image::DynamicImage> {
     use pinray::{CaptureEvent, CaptureSession, PixelFormat, SourceId, VideoCaptureTarget};
     let target = if mode == "window" {
         VideoCaptureTarget::Window(SourceId::new(window))
@@ -127,6 +170,7 @@ fn native_frame(mode: &str, display: &str, window: &str) -> Reply<image::Dynamic
         VideoCaptureTarget::Display(SourceId::new(display))
     };
     let builder = CaptureSession::builder()
+        .backend_preference(tinrec_capture::platform::capture_backend())
         .video_target(target)
         .pixel_format(PixelFormat::Bgra8888)
         .queue_depth(2);
@@ -138,9 +182,15 @@ fn native_frame(mode: &str, display: &str, window: &str) -> Reply<image::Dynamic
         }
     }
     let session = Stop(&mut capture);
+    if cancelled.load(Ordering::Acquire) {
+        return Err("Captura cancelada".into());
+    }
     session.0.start().map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Captura cancelada".into());
+        }
         match session.0.next_event(Some(Duration::from_millis(50))) {
             Ok(CaptureEvent::Video(frame)) => {
                 if u64::from(frame.width) * u64::from(frame.height) > 40_000_000 {
@@ -168,9 +218,16 @@ fn native_frame(mode: &str, display: &str, window: &str) -> Reply<image::Dynamic
     Err("A captura não enviou uma imagem.".into())
 }
 #[tauri::command]
-pub fn begin_print_edit(state: State<'_, Shared>, prints: State<'_, Prints>) -> Reply<()> {
+pub fn begin_print_edit(
+    app: tauri::AppHandle,
+    state: State<'_, Shared>,
+    prints: State<'_, Prints>,
+) -> Reply<()> {
     let session = lock(&state.session)?;
-    if session.snapshot.busy() || prints.busy.swap(true, Ordering::AcqRel) {
+    if session.snapshot.busy()
+        || app.state::<crate::area_picker::Picker>().active()
+        || prints.busy.swap(true, Ordering::AcqRel)
+    {
         return Err("Finalize a captura atual.".into());
     }
     Ok(())
@@ -183,24 +240,64 @@ pub async fn capture_print(
     mode: String,
     display: String,
     window: String,
+    action: Option<String>,
 ) -> Reply<Capture> {
+    if action
+        .as_deref()
+        .is_some_and(|action| !["copy", "save"].contains(&action))
+        || (mode == "area" && action.is_some())
+    {
+        return Err("Ação de captura inválida".into());
+    }
     if !["screen", "window", "area"].contains(&mode.as_str()) {
         return Err("Modo inválido.".into());
-    }
-    {
-        let session = lock(&state.session)?;
-        if session.snapshot.busy() || prints.busy.swap(true, Ordering::AcqRel) {
-            return Err("Finalize a captura atual antes de tirar um print.".into());
-        }
     }
     let main = app
         .get_webview_window("main")
         .ok_or("Janela indisponível")?;
+    {
+        let session = lock(&state.session)?;
+        if session.snapshot.busy()
+            || app.state::<crate::area_picker::Picker>().active()
+            || prints.busy.swap(true, Ordering::AcqRel)
+        {
+            return Err("Finalize a captura atual antes de tirar um print.".into());
+        }
+        prints.cancelled.store(false, Ordering::Release);
+        prints.capturing.store(true, Ordering::Release);
+    }
     let restore = main.is_visible().unwrap_or(false);
-    let _ = main.hide();
+    if restore {
+        let _ = main.hide();
+        if cfg!(target_os = "windows") {
+            let _ = main.is_visible();
+        }
+    }
     let result: Reply<Capture> = async {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        if restore && !cfg!(target_os = "windows") {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let selection =
+            if mode == "area" && cfg!(target_os = "windows") && !crate::synthetic_enabled() {
+                Some(
+                    crate::area_picker::pick(app.clone(), state.inner().clone(), true)
+                        .await?
+                        .ok_or("Captura cancelada")?,
+                )
+            } else {
+                None
+            };
+        let prepare_started = Instant::now();
+        let retained = selection.as_ref().and_then(|s| s.editor_window.clone());
+        *lock(&prints.editor)? = retained.clone();
+        if prints.cancelled.load(Ordering::Acquire) {
+            return Err("Captura cancelada".into());
+        }
+        let display = selection.as_ref().map_or(display, |s| s.display.clone());
+        if selection.is_some() && retained.is_none() && !cfg!(target_os = "windows") {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
         let requested_display = display.clone();
         let monitors = main.available_monitors().map_err(|e| e.to_string())?;
         let simple_portal = wayland && mode != "window" && monitors.len() == 1;
@@ -234,50 +331,176 @@ pub async fn capture_print(
                 return Err("Portal indisponível".into());
             }
         } else {
-            let m = mode.clone();
-            // A non-auto display target restricts the Wayland portal to monitors.
-            // Area selection belongs to Tinrec, never to the portal's region picker.
-            let capture_display = print_display(wayland, display);
+            #[cfg(target_os = "windows")]
+            if mode != "window" {
+                let (origin, width, height) = if let Some(selection) = &selection {
+                    let current = monitors
+                        .iter()
+                        .find(|monitor| {
+                            monitor
+                                .name()
+                                .is_some_and(|name| selection.display == format!("display:{name}"))
+                        })
+                        .ok_or("O monitor foi desconectado. Selecione novamente.")?;
+                    if selection.origin != Some((current.position().x, current.position().y))
+                        || (selection.source_width, selection.source_height)
+                            != (current.size().width, current.size().height)
+                    {
+                        return Err("O monitor mudou. Selecione novamente.".into());
+                    }
+                    (
+                        selection.origin.ok_or("Origem do monitor indisponível")?,
+                        selection.source_width,
+                        selection.source_height,
+                    )
+                } else {
+                    let monitor = crate::windows::capture_monitor(&app, &display)?;
+                    (
+                        (monitor.position().x, monitor.position().y),
+                        monitor.size().width,
+                        monitor.size().height,
+                    )
+                };
+                let capture_app = app.clone();
+                let source = display.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    crate::print_frame::capture(origin.0, origin.1, width, height).or_else(|_| {
+                        native_frame(
+                            "screen",
+                            &source,
+                            "",
+                            &capture_app.state::<Prints>().cancelled,
+                        )
+                    })
+                })
+                .await
+                .map_err(|e| e.to_string())??
+            } else {
+                let capture_app = app.clone();
+                let source = window.clone();
+                let display = display.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    native_frame(
+                        "window",
+                        &display,
+                        &source,
+                        &capture_app.state::<Prints>().cancelled,
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())??
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let m = mode.clone();
+                // A non-auto display target restricts the Wayland portal to monitors.
+                // Area selection belongs to Tinrec, never to the portal's region picker.
+                let capture_display = print_display(wayland, display);
+                let capture_app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    native_frame(
+                        &m,
+                        &capture_display,
+                        &window,
+                        &capture_app.state::<Prints>().cancelled,
+                    )
+                })
+                .await
+                .map_err(|e| e.to_string())??
+            }
+        };
+        if prints.cancelled.load(Ordering::Acquire) {
+            return Err("Captura cancelada".into());
+        }
+        if mode != "area"
+            && let Some(action) = action
+        {
+            let (width, height) = (image.width(), image.height());
+            let export_app = app.clone();
+            let export_state = state.inner().clone();
             tauri::async_runtime::spawn_blocking(move || {
-                native_frame(&m, &capture_display, &window)
+                export_image(
+                    &export_app,
+                    &export_state,
+                    image,
+                    None,
+                    String::new(),
+                    &action,
+                )
             })
             .await
-            .map_err(|e| e.to_string())??
-        };
+            .map_err(|e| e.to_string())??;
+            return Ok(Capture {
+                id: uuid::Uuid::new_v4().to_string(),
+                image: String::new(),
+                width,
+                height,
+                needs_crop: false,
+            });
+        }
         let image = if mode == "area" {
+            let image = std::sync::Arc::new(image);
             let (sender, receiver) = mpsc::channel();
+            if let Some(selection) = &selection
+                && (image.width(), image.height())
+                    != (selection.source_width, selection.source_height)
+            {
+                return Err("O monitor mudou. Selecione a área novamente.".into());
+            }
+            let frame_id = uuid::Uuid::new_v4().to_string();
+            let image_source = if cfg!(target_os = "windows") {
+                let bitmap = crate::print_frame::bitmap(&image)?;
+                if crate::smoke::self_test_mode() {
+                    eprintln!(
+                        "Print capture + bitmap: {} ms",
+                        prepare_started.elapsed().as_millis()
+                    );
+                }
+                *lock(&prints.bitmap)? = Some((frame_id.clone(), std::sync::Arc::new(bitmap)));
+                format!("http://tinrec-print.localhost/{frame_id}")
+            } else {
+                encoded_preview(&image)?
+            };
             let preview = crate::Preview {
-                session_id: uuid::Uuid::new_v4().to_string(),
+                initial_selection: selection.as_ref().map(|s| s.region),
+                session_id: frame_id,
                 sequence: 1,
-                image: encoded(&image)?,
+                image: image_source,
                 width: image.width(),
                 height: image.height(),
                 source_width: image.width(),
                 source_height: image.height(),
             };
-            let monitors = main.available_monitors().map_err(|e| e.to_string())?;
-            let source_name = pinray::enumerate_sources().ok().and_then(|sources| {
-                sources.into_iter().find_map(|source| match source {
-                    pinray::CaptureSource::Display(value) if value.id.0 == requested_display => {
-                        Some(value.name)
-                    }
-                    _ => None,
-                })
-            });
-            let matches = monitors
-                .iter()
-                .filter(|m| {
-                    crate::source_matches_monitor(
-                        m.size().width,
-                        m.size().height,
-                        m.scale_factor(),
-                        image.width(),
-                        image.height(),
-                    )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let monitor = monitors
+            // A retained selector already occupies the correct monitor.
+            if retained.is_none() {
+                let monitors = main.available_monitors().map_err(|e| e.to_string())?;
+                let source_name = pinray::enumerate_sources().ok().and_then(|sources| {
+                    sources.into_iter().find_map(|source| match source {
+                        pinray::CaptureSource::Display(value)
+                            if value.id.0 == requested_display =>
+                        {
+                            Some(value.name)
+                        }
+                        _ => None,
+                    })
+                });
+                let matches = monitors
+                    .iter()
+                    .filter(|m| {
+                        crate::source_matches_monitor(
+                            m.size().width,
+                            m.size().height,
+                            m.scale_factor(),
+                            image.width(),
+                            image.height(),
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let monitor = if cfg!(target_os = "windows") && !crate::synthetic_enabled() {
+                    crate::windows::capture_monitor(&app, &requested_display)?
+                } else {
+                    monitors
                 .iter()
                 .find(|m| {
                     source_name
@@ -296,38 +519,59 @@ pub async fn capture_print(
                 .or_else(|| (monitors.len() == 1).then(|| monitors[0].clone()))
                 .ok_or(
                     "Não foi possível identificar o monitor sem ambiguidade. Escolha outra fonte.",
-                )?;
+                )?
+                };
+                let overlay = app
+                    .get_webview_window("print-area")
+                    .ok_or("Seletor indisponível")?;
+                overlay
+                    .set_position(*monitor.position())
+                    .map_err(|e| e.to_string())?;
+                overlay
+                    .set_size(*monitor.size())
+                    .map_err(|e| e.to_string())?;
+                overlay
+                    .set_position(*monitor.position())
+                    .map_err(|e| e.to_string())?;
+            }
             *lock(&prints.area)? = Some(PrintArea {
+                source: image.clone(),
+                prepared: prepare_started,
+                ready: false,
                 preview: preview.clone(),
                 sender,
             });
+            let editor = retained.as_deref().unwrap_or("print-area");
+            *lock(&prints.editor)? = Some(editor.into());
             let overlay = app
-                .get_webview_window("print-area")
+                .get_webview_window(editor)
                 .ok_or("Seletor indisponível")?;
-            overlay
-                .set_position(*monitor.position())
-                .map_err(|e| e.to_string())?;
-            overlay
-                .set_size(*monitor.size())
-                .map_err(|e| e.to_string())?;
-            // Resizing across different DPI monitors can change the origin.
-            overlay
-                .set_position(*monitor.position())
-                .map_err(|e| e.to_string())?;
-            app.emit_to("print-area", "print-area-selection", preview)
-                .map_err(|e| e.to_string())?;
-            overlay.show().map_err(|e| e.to_string())?;
+            // Focus the selected monitor, including keyboard-driven handoffs.
             overlay.set_focus().map_err(|e| e.to_string())?;
+            app.emit_to(editor, "print-area-selection", preview)
+                .map_err(|e| e.to_string())?;
+            if retained.is_none() {
+                overlay.show().map_err(|e| e.to_string())?;
+                overlay.set_focus().map_err(|e| e.to_string())?;
+            }
             let result = tauri::async_runtime::spawn_blocking(move || {
                 receiver.recv_timeout(Duration::from_secs(1800))
             })
             .await
             .map_err(|e| e.to_string())?;
-            let _ = overlay.hide();
             lock(&prints.area)?.take();
-            let rect = result
+            let (rect, return_image) = result
                 .map_err(|_| "Tempo de seleção esgotado")?
                 .ok_or("Captura cancelada")?;
+            if !return_image {
+                return Ok(Capture {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    image: String::new(),
+                    width: rect.width,
+                    height: rect.height,
+                    needs_crop: false,
+                });
+            }
             image.crop_imm(rect.x as u32, rect.y as u32, rect.width, rect.height)
         } else {
             image
@@ -342,10 +586,11 @@ pub async fn capture_print(
         })
     }
     .await;
-    if restore || result.is_ok() {
+    if restore {
         let _ = main.show();
         let _ = main.set_focus();
     }
+    close_editor(&app, &prints);
     if result.is_err() {
         if let Ok(mut pending) = prints.area.lock() {
             pending.take();
@@ -353,12 +598,22 @@ pub async fn capture_print(
         if let Some(window) = app.get_webview_window("print-area") {
             let _ = window.hide();
         }
-        prints.busy.store(false, Ordering::Release);
+    }
+    {
+        let _session = lock(&state.session)?;
+        prints.capturing.store(false, Ordering::Release);
+        if result.is_err() {
+            prints.busy.store(false, Ordering::Release);
+        }
     }
     result
 }
 #[tauri::command]
 pub fn close_print(app: tauri::AppHandle, prints: State<'_, Prints>) {
+    if prints.capturing.load(Ordering::Acquire) {
+        prints.cancelled.store(true, Ordering::Release);
+    }
+    close_editor(&app, &prints);
     if let Ok(mut area) = prints.area.lock()
         && let Some(pending) = area.take()
     {
@@ -367,7 +622,9 @@ pub fn close_print(app: tauri::AppHandle, prints: State<'_, Prints>) {
     if let Some(window) = app.get_webview_window("print-area") {
         let _ = window.hide();
     }
-    prints.busy.store(false, Ordering::Release);
+    if !prints.capturing.load(Ordering::Acquire) {
+        prints.busy.store(false, Ordering::Release);
+    }
 }
 #[tauri::command]
 pub fn get_print_area(prints: State<'_, Prints>) -> Reply<Option<crate::Preview>> {
@@ -377,9 +634,9 @@ pub fn get_print_area(prints: State<'_, Prints>) -> Reply<Option<crate::Preview>
 }
 #[tauri::command]
 pub fn select_print_area(
-    app: tauri::AppHandle,
     prints: State<'_, Prints>,
     session_id: String,
+    return_image: Option<bool>,
     x: i32,
     y: i32,
     width: u32,
@@ -397,16 +654,16 @@ pub fn select_print_area(
     {
         return Err("Área inválida.".into());
     }
-    if let Some(window) = app.get_webview_window("print-area") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
     area.sender
-        .send(Some(pinray::Rect {
-            x,
-            y,
-            width,
-            height,
-        }))
+        .send(Some((
+            pinray::Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            return_image.unwrap_or(true),
+        )))
         .map_err(|_| "Captura encerrada")?;
     pending.take();
     Ok(())
@@ -442,6 +699,25 @@ pub fn set_print_keep_local(state: State<'_, Shared>, keep: bool) -> Reply<()> {
     )
     .map_err(|e| e.to_string())
 }
+fn preserve_unsent_print(path: &std::path::Path, library: &std::path::Path, error: &str) -> String {
+    let recovery = library.join(path.file_name().unwrap_or_default());
+    if path != recovery {
+        let saved = fs::create_dir_all(library).and_then(|_| {
+            tinrec_capture::platform::publish_file(path, &recovery).map_err(std::io::Error::other)
+        });
+        if let Err(recovery_error) = saved {
+            return format!(
+                "Envio não iniciado: {error}. Print preservado em {}. Não foi possível movê-lo para a biblioteca: {recovery_error}",
+                path.display()
+            );
+        }
+    }
+    format!(
+        "Envio não iniciado: {error}. Print preservado na biblioteca: {}",
+        recovery.display()
+    )
+}
+
 #[tauri::command]
 pub async fn export_print(
     app: tauri::AppHandle,
@@ -462,10 +738,27 @@ pub async fn export_print(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data)
         .map_err(|_| "Imagem inválida")?;
-    let decoded = tauri::async_runtime::spawn_blocking(move || decode(&bytes))
-        .await
-        .map_err(|e| e.to_string())??;
-    let keep_local = action == "save" || get_print_keep_local(state.clone())?;
+    let (decoded, bytes) =
+        tauri::async_runtime::spawn_blocking(move || validated_export_png(bytes))
+            .await
+            .map_err(|e| e.to_string())??;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        export_image(&app, &state, decoded, Some(bytes), title, &action)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+fn export_image(
+    app: &tauri::AppHandle,
+    state: &Shared,
+    decoded: image::DynamicImage,
+    encoded: Option<Vec<u8>>,
+    title: String,
+    action: &str,
+) -> Reply<Export> {
+    let export_started = Instant::now();
+    let keep_local = action == "save" || get_print_keep_local(app.state::<Shared>())?;
     let mut clipboard_error = None;
     if action == "copy" {
         let rgba = decoded.to_rgba8();
@@ -502,7 +795,10 @@ pub async fn export_print(
     fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let name = format!("{title} - {}.png", &id[..8]);
     let path = folder.join(&name);
-    let bytes = png(&decoded)?;
+    let bytes = match encoded {
+        Some(bytes) => bytes,
+        None => preview_png(&decoded)?,
+    };
     let temporary = folder.join(format!(".{id}.partial"));
     {
         use std::io::Write;
@@ -511,19 +807,36 @@ pub async fn export_print(
     }
     fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
     let upload_id = if action == "upload" {
-        state
+        let job_id = match state
             .cloud
-            .enqueue(id.clone(), path.clone(), title, 1080, 0., false)?;
+            .enqueue(id.clone(), path.clone(), title, 1080, 0., false)
+        {
+            Ok(job) => job,
+            Err(error) => {
+                let library = lock(&state.folder)?.join("Prints");
+                return Err(preserve_unsent_print(&path, &library, &error));
+            }
+        };
         if !keep_local {
-            state.cloud.remove_local_after_upload(&id)?;
+            state.cloud.remove_local_after_upload(&job_id).map_err(|error| format!("O print está na fila, mas a política de limpeza não pôde ser salva: {error}. Arquivo preservado em {}", path.display()))?;
         }
-        open_uploaded_print(app.clone(), state.inner().clone(), path);
-        Some(id)
+        crate::pages::open(
+            app.clone(),
+            state.clone(),
+            crate::pages::Page::Print(job_id.clone()),
+        );
+        Some(job_id)
     } else {
         None
     };
     if let Some(error) = clipboard_error {
         return Err(format!("Print salvo. Não foi possível copiar: {error}"));
+    }
+    if crate::smoke::self_test_mode() {
+        eprintln!(
+            "Print export ({action}): {} ms",
+            export_started.elapsed().as_millis()
+        );
     }
     Ok(Export {
         file_name: Some(name),
@@ -601,7 +914,7 @@ pub fn upload_print(
     file_name: String,
 ) -> Reply<()> {
     let path = print_path(&state, &file_name)?;
-    state.cloud.enqueue(
+    let job_id = state.cloud.enqueue(
         uuid::Uuid::new_v4().to_string(),
         path.clone(),
         file_name.trim_end_matches(".png").to_string(),
@@ -609,29 +922,14 @@ pub fn upload_print(
         0.,
         false,
     )?;
-    open_uploaded_print(app, state.inner().clone(), path);
+    crate::pages::open(
+        app,
+        state.inner().clone(),
+        crate::pages::Page::Print(job_id),
+    );
     Ok(())
 }
 
-// The overlay can close before the server reserves the page. Keep this work in
-// the backend and resolve by path so an already-queued print opens its own page.
-fn open_uploaded_print(app: tauri::AppHandle, state: Shared, path: std::path::PathBuf) {
-    tauri::async_runtime::spawn_blocking(move || {
-        while !state.exiting.load(Ordering::Acquire) {
-            match state.cloud.reserved_url(&path) {
-                Ok(Some(url)) => {
-                    if let Err(error) = app.opener().open_url(url, None::<&str>) {
-                        eprintln!("Print enviado, mas não foi possível abrir o navegador: {error}");
-                    }
-                    return;
-                }
-                Ok(None) => {}
-                Err(_) => return,
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    });
-}
 #[tauri::command]
 pub fn print_site(app: tauri::AppHandle, state: State<'_, Shared>, file_name: String) -> Reply<()> {
     let url = state
@@ -709,6 +1007,148 @@ pub async fn open_print_project(
     .map_err(|e| e.to_string())?
 }
 
+pub(crate) fn editor_label(app: &tauri::AppHandle) -> Option<String> {
+    app.state::<Prints>()
+        .editor
+        .lock()
+        .ok()
+        .and_then(|editor| editor.clone())
+}
+fn close_editor(app: &tauri::AppHandle, prints: &Prints) {
+    if let Ok(mut bitmap) = prints.bitmap.lock() {
+        bitmap.take();
+    }
+    let editor = prints
+        .editor
+        .lock()
+        .ok()
+        .and_then(|mut editor| editor.take());
+    if let Some(label) = editor
+        && let Some(window) = app.get_webview_window(&label)
+    {
+        let _ = window.hide();
+        if crate::area_picker::is_window(&label) {
+            let _ = app.emit_to(&label, "area-reset", ());
+        }
+    }
+}
+pub(crate) fn close_area_selector(app: &tauri::AppHandle) {
+    let prints = app.state::<Prints>();
+    if prints.capturing.load(Ordering::Acquire) {
+        close_print(app.clone(), prints);
+    }
+}
+
+pub(crate) fn frame_response(
+    app: &tauri::AppHandle,
+    label: &str,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    let prints = app.state::<Prints>();
+    let allowed = editor_label(app).is_some_and(|editor| editor == label)
+        || (label == "main" && crate::smoke::self_test_mode());
+    let frame = if allowed {
+        prints.bitmap.lock().ok().and_then(|frame| {
+            frame
+                .as_ref()
+                .filter(|(id, _)| path.strip_prefix('/') == Some(id.as_str()))
+                .map(|(_, bytes)| bytes.clone())
+        })
+    } else {
+        None
+    };
+    let mut response = tauri::http::Response::builder()
+        .header("Content-Type", "image/bmp")
+        .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", "*");
+    let bytes = if let Some(frame) = frame {
+        (*frame).clone()
+    } else {
+        response = response.status(404);
+        Vec::new()
+    };
+    response.body(bytes).expect("valid frame response")
+}
+#[tauri::command]
+pub fn print_editor_ready(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    prints: State<'_, Prints>,
+    session_id: String,
+) -> Reply<()> {
+    if editor_label(&app).as_deref() != Some(window.label()) {
+        return Err("Editor encerrado".into());
+    }
+    let mut area = lock(&prints.area)?;
+    let area = area
+        .as_mut()
+        .filter(|area| area.preview.session_id == session_id)
+        .ok_or("Captura encerrada")?;
+    if !area.ready && crate::smoke::self_test_mode() {
+        eprintln!(
+            "Print selection -> editor painted: {} ms",
+            area.prepared.elapsed().as_millis()
+        );
+    }
+    area.ready = true;
+    Ok(())
+}
+#[tauri::command]
+pub fn self_test_print_ready(app: tauri::AppHandle) -> Reply<bool> {
+    if !crate::smoke::self_test_mode() {
+        return Err("Comando exclusivo do autoteste".into());
+    }
+    Ok(lock(&app.state::<Prints>().area)?
+        .as_ref()
+        .is_some_and(|area| area.ready))
+}
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionExport {
+    session_id: String,
+    rect: crate::area_picker::Region,
+    title: String,
+    action: String,
+}
+#[tauri::command]
+pub async fn export_print_selection(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    state: State<'_, Shared>,
+    prints: State<'_, Prints>,
+    request: SelectionExport,
+) -> Reply<Export> {
+    if !["copy", "save", "upload"].contains(&request.action.as_str()) {
+        return Err("Ação inválida".into());
+    }
+    if editor_label(&app).as_deref() != Some(window.label())
+        && !(window.label() == "main" && crate::smoke::self_test_mode())
+    {
+        return Err("Editor encerrado".into());
+    }
+    let source = {
+        let area = lock(&prints.area)?;
+        let area = area
+            .as_ref()
+            .filter(|area| area.preview.session_id == request.session_id)
+            .ok_or("Captura encerrada")?;
+        if !request
+            .rect
+            .valid(area.source.width(), area.source.height())
+        {
+            return Err("Área inválida".into());
+        }
+        area.source.clone()
+    };
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let rect = request.rect;
+        let cropped = source.crop_imm(rect.x as u32, rect.y as u32, rect.width, rect.height);
+        export_image(&app, &state, cropped, None, request.title, &request.action)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,18 +1159,52 @@ mod tests {
         assert_eq!(print_display(true, "DP-1".into()), "DP-1");
     }
     #[test]
-    fn png_roundtrip_preserves_pixels() {
-        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            3,
-            2,
-            image::Rgba([10, 20, 30, 255]),
-        ));
-        let result = decode(&png(&image).unwrap()).unwrap();
-        assert_eq!(result.to_rgba8().get_pixel(0, 0).0, [10, 20, 30, 255]);
-        assert_eq!(result.dimensions(), (3, 2));
+    fn failed_upload_moves_pending_print_into_recoverable_library_without_overwrite() {
+        let dir =
+            std::env::temp_dir().join(format!("tinrec-print-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("print.png");
+        fs::write(&source, b"original png").unwrap();
+        let library = dir.join("Prints");
+        let message = preserve_unsent_print(&source, &library, "Conta desconectada");
+        assert!(message.contains("biblioteca"));
+        assert_eq!(
+            fs::read(library.join("print.png")).unwrap(),
+            b"original png"
+        );
+        assert!(!source.exists());
+        fs::write(&source, b"another png").unwrap();
+        let message = preserve_unsent_print(&source, &library, "offline");
+        assert!(message.contains(&source.display().to_string()));
+        assert_eq!(fs::read(&source).unwrap(), b"another png");
+        assert_eq!(
+            fs::read(library.join("print.png")).unwrap(),
+            b"original png"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn invalid_images_are_rejected() {
+    fn png_roundtrip_preserves_pixels_and_rejects_invalid_data() {
+        let image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(7, 5, |x, y| {
+            image::Rgba([
+                (x * 30) as u8,
+                (y * 40) as u8,
+                ((x + y) * 10) as u8,
+                128 + (x * y) as u8,
+            ])
+        }));
+        for bytes in [png(&image).unwrap(), preview_png(&image).unwrap()] {
+            let (result, preserved) = validated_export_png(bytes.clone()).unwrap();
+            assert_eq!(preserved, bytes);
+            assert_eq!(result.to_rgba8(), image.to_rgba8());
+            assert_eq!(result.dimensions(), (7, 5));
+        }
         assert!(decode(b"not an image").is_err());
+        let mut jpeg = Vec::new();
+        let rgb = image.to_rgb8();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .write_image(rgb.as_raw(), 7, 5, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        assert!(validated_export_png(jpeg).is_err());
     }
 }

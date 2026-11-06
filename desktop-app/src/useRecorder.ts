@@ -6,12 +6,14 @@ import {
   recordingNameError,
 } from "./recordingName";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   busy,
   call,
   idle,
   message,
   subscribe,
+  type AreaSelection,
   type Snapshot,
   type Sources,
   type CaptureMode,
@@ -87,22 +89,37 @@ export function useRecorder() {
   const [pending, setPending] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const mounted = useRef(false);
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen<string>("desktop-error", ({ payload }) => { if (!disposed) setError(payload); })
+      .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  }, []);
   const [cameraLoading, setCameraLoading] = useState(false);
   const [cameras, setCameras] = useState<{ id: string; name: string }[]>([]);
   const captureSources = sources ? { ...sources, cameras } : null;
-  const refreshCameras = useCallback(async () => {
+  const cameraRequest = useRef<Promise<{ id: string; name: string }[]> | null>(null);
+  const refreshCameras = useCallback(() => {
+    if (cameraRequest.current) return cameraRequest.current;
     setCameraLoading(true);
-    try {
-      const cameras = await call<{ id: string; name: string }[]>("get_cameras");
-      if (mounted.current) setCameras(cameras);
-    } catch (error) {
+    const request = call<{ id: string; name: string }[]>("get_cameras").then((found) => {
+      if (mounted.current) setCameras(found);
+      return found;
+    }).catch((error) => {
       if (mounted.current) setError(message(error));
-    } finally {
+      throw error;
+    }).finally(() => {
+      cameraRequest.current = null;
       if (mounted.current) setCameraLoading(false);
-    }
+    });
+    cameraRequest.current = request;
+    return request;
   }, []);
   useEffect(() => {
-    if (settings.webcamEnabled) void refreshCameras();
+    void refreshCameras().catch((error) => {
+      if (mounted.current) setError(message(error));
+    });
   }, [settings.webcamEnabled, refreshCameras]);
   const accept = useCallback((next: Snapshot) => {
     if (mounted.current)
@@ -192,6 +209,7 @@ export function useRecorder() {
     try {
       await operation();
     } catch (e) {
+      if (name === "start") await call("show_recorder").catch(() => {});
       setError(message(e));
     } finally {
       if (mounted.current) setPending(null);
@@ -221,12 +239,16 @@ export function useRecorder() {
     refresh,
     start: (mode?: CaptureMode, overrides: Partial<Settings> = {}) =>
       act("start", async () => {
-        const request = {
+        const request: Settings & { crop?: AreaSelection } = {
           ...settings,
           ...overrides,
           captureMode: mode ?? settings.captureMode,
         };
         if (sources?.wayland) request.display = "auto";
+        if (!request.camera && !request.webcamEnabled) {
+          const available = cameraRequest.current ? await cameraRequest.current.catch(() => []) : cameras;
+          request.camera = available[0]?.id ?? "";
+        }
         if (
           request.captureMode === "window" &&
           !sources?.wayland &&
@@ -235,15 +257,27 @@ export function useRecorder() {
           throw new Error("Escolha uma janela para gravar.");
         if (request.webcamEnabled && !request.camera)
           throw new Error("Escolha uma câmera para gravar.");
-        const title = resolveRecordingName(
+        const date = new Date();
+        const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
+        const resolveTitle = () => resolveRecordingName(
           request.title,
-          new Date(),
+          date,
           recordingSource(request, captureSources),
-          crypto.randomUUID().replaceAll("-", "").slice(0, 6),
+          suffix,
           captureType(request.captureMode),
         );
+        let title = resolveTitle();
         const error = recordingNameError(settings.title, title);
         if (error) throw new Error(error);
+        if (request.captureMode === "area" && sources?.platform === "windows" && !sources.synthetic) {
+          const selection = await call<AreaSelection | null>("choose_area");
+          if (!selection) return;
+          request.display = selection.display;
+          request.crop = selection;
+          title = resolveTitle();
+          const selectedNameError = recordingNameError(settings.title, title);
+          if (selectedNameError) throw new Error(selectedNameError);
+        }
         accept(
           await call<Snapshot>("start_recording", {
             request: Object.fromEntries(

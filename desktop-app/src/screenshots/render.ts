@@ -1,10 +1,15 @@
-import { type PrintDocument, type Operation } from "./document";
+import {
+  numberedArrowRadius,
+  type PrintDocument,
+  type Operation,
+} from "./document";
 const images = new Map<string, Promise<HTMLImageElement>>();
 export function loadImage(src: string) {
   let pending = images.get(src);
   if (!pending) {
     pending = new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
+      image.crossOrigin = "anonymous";
       image.onload = () => resolve(image);
       image.onerror = () =>
         reject(new Error("Não foi possível abrir a imagem."));
@@ -14,6 +19,9 @@ export function loadImage(src: string) {
     images.set(src, pending);
   }
   return pending;
+}
+export function releaseImage(src: string) {
+  images.delete(src);
 }
 function canvas(width: number, height: number) {
   if (width < 1 || height < 1 || width * height > 40_000_000)
@@ -109,6 +117,37 @@ async function draw(ctx: CanvasRenderingContext2D, op: Operation) {
     width = Math.abs(op.w),
     height = Math.abs(op.h);
   switch (op.tool) {
+    case "numbered-arrow": {
+      const radius = numberedArrowRadius(op),
+        angle = Math.atan2(op.h, op.w);
+      const sideX = -Math.sin(angle) * radius * 0.75,
+        sideY = Math.cos(angle) * radius * 0.75;
+      if (Math.hypot(op.w, op.h) > radius) {
+        ctx.beginPath();
+        ctx.moveTo(op.x + sideX, op.y + sideY);
+        ctx.lineTo(op.x + op.w, op.y + op.h);
+        ctx.lineTo(op.x - sideX, op.y - sideY);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.beginPath();
+      ctx.arc(op.x, op.y, radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = Math.max(1, radius / 14);
+      ctx.stroke();
+      const label = String(op.number ?? 1);
+      ctx.font = "bold " + radius * 1.1 + "px Arial";
+      const measured = ctx.measureText(label).width;
+      if (measured > radius * 1.5)
+        ctx.font =
+          "bold " + radius * 1.1 * ((radius * 1.5) / measured) + "px Arial";
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, op.x, op.y + radius * 0.04);
+      break;
+    }
     case "rectangle":
       ctx.strokeRect(left, top, width, height);
       if (op.filled) ctx.fillRect(left, top, width, height);
@@ -264,11 +303,32 @@ async function draw(ctx: CanvasRenderingContext2D, op: Operation) {
 }
 export async function renderDocument(doc: PrintDocument) {
   await document.fonts?.ready;
-  let output = canvas(doc.width, doc.height);
-  output
-    .getContext("2d")!
-    .drawImage(await loadImage(doc.source), 0, 0, doc.width, doc.height);
-  for (const op of doc.operations) {
+  const source = await loadImage(doc.source);
+  const first = doc.operations[0];
+  const directCrop =
+    first?.tool === "crop" &&
+    source.naturalWidth === doc.width &&
+    source.naturalHeight === doc.height;
+  let output = canvas(
+    directCrop ? first.w : doc.width,
+    directCrop ? first.h : doc.height,
+  );
+  if (directCrop)
+    output
+      .getContext("2d")!
+      .drawImage(
+        source,
+        first.x,
+        first.y,
+        first.w,
+        first.h,
+        0,
+        0,
+        first.w,
+        first.h,
+      );
+  else output.getContext("2d")!.drawImage(source, 0, 0, doc.width, doc.height);
+  for (const op of doc.operations.slice(directCrop ? 1 : 0)) {
     if (op.tool === "crop" || op.tool === "resize") {
       const next = canvas(op.w, op.h),
         ctx = next.getContext("2d")!;
@@ -283,5 +343,19 @@ export async function renderDocument(doc: PrintDocument) {
 }
 export async function exportPng(doc: PrintDocument) {
   const result = await renderDocument(doc);
-  return result.toDataURL("image/png");
+  const blob = await new Promise<Blob>((resolve, reject) =>
+    result.toBlob(
+      (value) =>
+        value
+          ? resolve(value)
+          : reject(new Error("Não foi possível gerar o PNG")),
+      "image/png",
+    ),
+  );
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new Error("Não foi possível ler o PNG"));
+    reader.readAsDataURL(blob);
+  });
 }

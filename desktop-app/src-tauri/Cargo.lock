@@ -5297,7 +5297,7 @@ dependencies = [
 
 [[package]]
 name = "tinrec-desktop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ashpd",
  "base64 0.22.1",
@@ -5321,6 +5321,7 @@ dependencies = [
  "tokio",
  "uuid",
  "webkit2gtk",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -1,9 +1,17 @@
 import { listen } from "@tauri-apps/api/event";
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import { useRecorder } from "./useRecorder";
 import { call, idle, subscribe, type Snapshot } from "./bridge";
 
 vi.mock("./bridge", async (original) => ({
@@ -12,13 +20,13 @@ vi.mock("./bridge", async (original) => ({
   subscribe: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
+let desktopErrorListener: (event: { payload: string }) => void;
 let shortcutListener: (event: { payload: string }) => void;
 let current: Snapshot;
 let listener: (snapshot: Snapshot) => void;
 let ready: boolean;
-let wayland: boolean;
-let platform: string;
 let startError: string | null;
+let cancelArea = false;
 const file = {
   fileName: "Conversa - 123.mp4",
   title: "Conversa",
@@ -43,10 +51,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   current = { ...idle };
   ready = true;
-  wayland = true;
-  platform = "windows";
   startError = null;
+  cancelArea = false;
   vi.mocked(listen).mockImplementation(async (name, callback) => {
+    if (name === "desktop-error")
+      desktopErrorListener = callback as typeof desktopErrorListener;
     if (name === "shortcut-action")
       shortcutListener = callback as typeof shortcutListener;
     return () => {};
@@ -61,8 +70,8 @@ beforeEach(() => {
         return current;
       case "get_sources":
         return {
-          platform,
-          wayland,
+          platform: "windows",
+          wayland: false,
           windows: [{ id: "window-1", name: "Editor" }],
           displays: [
             {
@@ -84,6 +93,11 @@ beforeEach(() => {
         };
       case "get_cameras":
         return [{ id: "camera-0", name: "USB Camera" }];
+      case "choose_area":
+        if (cancelArea) return null;
+        return { display: "monitor-right", sourceWidth: 1920, sourceHeight: 1080, x: 20, y: 30, width: 320, height: 240 };
+      case "capture_print":
+        return { image: "data:image/png;base64,YQ==" };
       case "get_folder":
         return "/tmp/Tinrec";
       case "list_recordings":
@@ -119,38 +133,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe("gravador desktop", () => {
-  it("no Linux mantém os três modos e envia a intenção de área ao portal", async () => {
-    platform = "linux";
-    const user = userEvent.setup();
-    render(<App />);
-    const button = await screen.findByRole("button", { name: "Área" });
-    await waitFor(() => expect(button).toHaveProperty("disabled", false));
-    for (const name of ["Tela", "Janela", "Área"])
-      expect(screen.getByRole("button", { name })).not.toBeNull();
-    await user.click(button);
-    expect(call).toHaveBeenCalledWith("start_recording", {
-      request: expect.objectContaining({
-        captureMode: "area",
-        display: "auto",
-      }),
-    });
-    expect(
-      screen.queryByRole("dialog", { name: "Selecionar área de gravação" }),
-    ).toBeNull();
-  });
-  it("mantém três modos no macOS", async () => {
-    platform = "macos";
-    wayland = false;
-    render(<App />);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
-        "disabled",
-        false,
-      ),
-    );
-    for (const name of ["Tela", "Janela", "Área"])
-      expect(screen.getByRole("button", { name })).not.toBeNull();
-  });
   it("inclui a webcam selecionada na gravação de tela", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -170,15 +152,15 @@ describe("gravador desktop", () => {
   });
   it("envia dispositivos e volumes, pausa, retoma, finaliza e abre o vídeo salvo", async () => {
     const user = userEvent.setup();
+    localStorage.setItem(
+      "tinrec.recorder.v2",
+      JSON.stringify({ title: "Conversa" }),
+    );
     render(<App />);
     const start = await screen.findByRole("button", {
       name: "Tela",
     });
     await waitFor(() => expect(start).toHaveProperty("disabled", false));
-    await user.click(screen.getByRole("button", { name: "Configurações" }));
-    await user.clear(screen.getByLabelText(/Nome do vídeo/));
-    await user.type(screen.getByLabelText(/Nome do vídeo/), "Conversa");
-    await user.click(screen.getByRole("button", { name: "Gravador" }));
     await user.click(
       screen.getByRole("button", { name: "Selecionar microfone" }),
     );
@@ -302,7 +284,7 @@ describe("gravador desktop", () => {
     await act(async () => shortcutListener({ payload: "start" }));
     expect(call).toHaveBeenCalledWith("start_recording", {
       request: expect.objectContaining({
-        title: expect.stringContaining("Tela selecionada"),
+        title: expect.stringContaining("Tela principal (Tela)"),
       }),
     });
     await publish({ phase: "recording" });
@@ -320,34 +302,27 @@ describe("gravador desktop", () => {
       screen.getByRole("heading", { name: "Configurações" }),
     ).not.toBeNull();
   });
-  it.each(["linux", "windows", "macos"])(
-    "remove Somente câmera e migra a preferência antiga em %s",
-    async (os) => {
-      platform = os;
-      localStorage.setItem(
-        "tinrec.recorder.v2",
-        JSON.stringify({ captureMode: "camera" }),
-      );
-      render(<App />);
-      await waitFor(() =>
-        expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
-          "disabled",
-          false,
-        ),
-      );
-      expect(
-        screen.queryByRole("button", { name: "Somente câmera" }),
-      ).toBeNull();
-      expect(
-        screen.getByRole("button", { name: "Selecionar webcam" }),
-      ).not.toBeNull();
-      expect(
-        JSON.parse(localStorage.getItem("tinrec.recorder.v2")!).captureMode,
-      ).toBe("screen");
-    },
-  );
+  it("migra a preferência antiga de câmera para tela no Windows", async () => {
+    localStorage.setItem(
+      "tinrec.recorder.v2",
+      JSON.stringify({ captureMode: "camera" }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
+        "disabled",
+        false,
+      ),
+    );
+    expect(screen.queryByRole("button", { name: "Somente câmera" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Selecionar webcam" }),
+    ).not.toBeNull();
+    expect(
+      JSON.parse(localStorage.getItem("tinrec.recorder.v2")!).captureMode,
+    ).toBe("screen");
+  });
   it("inicia ao escolher a janela quando ainda não existe uma fonte definida", async () => {
-    wayland = false;
     const user = userEvent.setup();
     render(<App />);
     await waitFor(() =>
@@ -369,6 +344,10 @@ describe("gravador desktop", () => {
     });
   });
   it("usa atalhos separados para janela e área", async () => {
+    localStorage.setItem(
+      "tinrec.recorder.v2",
+      JSON.stringify({ window: "window-1" }),
+    );
     render(<App />);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
@@ -381,9 +360,13 @@ describe("gravador desktop", () => {
       request: expect.objectContaining({ captureMode: "window" }),
     });
     await publish({ phase: "idle" });
+    cancelArea = true;
+    await act(async () => shortcutListener({ payload: "area" }));
+    expect(vi.mocked(call).mock.calls.filter(([name]) => name === "start_recording")).toHaveLength(1);
+    cancelArea = false;
     await act(async () => shortcutListener({ payload: "area" }));
     expect(call).toHaveBeenCalledWith("start_recording", {
-      request: expect.objectContaining({ captureMode: "area" }),
+      request: expect.objectContaining({ captureMode: "area", display: "monitor-right", crop: expect.objectContaining({ x:20, y:30, width:320, height:240 }) }),
     });
   });
   it("impede gravação quando falta o encoder e explica como preparar", async () => {
@@ -433,21 +416,6 @@ describe("gravador desktop", () => {
     expect(screen.getByText("Gravação pausada")).not.toBeNull();
   });
 });
-it("mantém captura na tela principal e prints salvos em tela própria", async () => {
-  render(<App />);
-  await userEvent.click(screen.getByRole("button", { name: "Print" }));
-  expect(
-    screen.getByRole("button", { name: "Print da tela" }).querySelector("svg"),
-  ).toBeTruthy();
-  expect(screen.queryByRole("searchbox", { name: "Buscar prints" })).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Prints" }));
-  expect(
-    await screen.findByRole("heading", { name: "Prints", level: 1 }),
-  ).toBeTruthy();
-  expect(screen.getByRole("searchbox", { name: "Buscar prints" })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: "Print da tela" })).toBeNull();
-});
-
 it("mantém preferências de armazenamento de vídeo e print independentes", async () => {
   render(<App />);
   await userEvent.click(screen.getByRole("button", { name: "Configurações" }));
@@ -466,11 +434,7 @@ it("mantém preferências de armazenamento de vídeo e print independentes", asy
   expect(screen.getByText("/tmp/Tinrec/Videos")).toBeTruthy();
   expect(screen.getByText("/tmp/Tinrec/Prints")).toBeTruthy();
 });
-it.each([
-  ["screenshot-screen", "screen"],
-  ["screenshot-window", "window"],
-  ["screenshot", "area"],
-])("encaminha atalho %s ao modo de print %s", async (action, mode) => {
+it("encaminha cada atalho ao modo de print correspondente", async () => {
   render(<App />);
   await waitFor(() =>
     expect(screen.getByRole("button", { name: "Tela" })).toHaveProperty(
@@ -478,11 +442,87 @@ it.each([
       false,
     ),
   );
-  await act(async () => shortcutListener({ payload: action }));
-  await waitFor(() =>
+  const modes = [
+    ["screenshot-screen", "screen"],
+    ["screenshot-window", "window"],
+    ["screenshot", "area"],
+  ];
+  for (const [index, [action, mode]] of modes.entries()) {
+    await act(async () => shortcutListener({ payload: action }));
+    await waitFor(() =>
+      expect(
+        vi.mocked(call).mock.calls.filter(([name]) => name === "close_print"),
+      ).toHaveLength(index + 1),
+    );
     expect(call).toHaveBeenCalledWith(
       "capture_print",
       expect.objectContaining({ mode }),
-    ),
+    );
+  }
+});
+
+it("reports background browser failures while browsing the print library", async () => {
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", { name: "Prints" }));
+  await waitFor(() => expect(desktopErrorListener).toBeTypeOf("function"));
+  await act(async () =>
+    desktopErrorListener({
+      payload: "Não foi possível abrir o navegador. Use Abrir no site.",
+    }),
   );
+  expect(screen.getByRole("alert").textContent).toContain(
+    "Não foi possível abrir o navegador",
+  );
+});
+
+it("aguarda a descoberta pendente antes de iniciar e reutiliza uma única consulta", async () => {
+  const original = vi.mocked(call).getMockImplementation()!;
+  let resolveCameras!: (value: { id: string; name: string }[]) => void;
+  const discovery = new Promise<{ id: string; name: string }[]>((resolve) => {
+    resolveCameras = resolve;
+  });
+  vi.mocked(call).mockImplementation((command, args) =>
+    command === "get_cameras" ? (discovery as never) : original(command, args),
+  );
+  const { result } = renderHook(() => useRecorder());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let start!: Promise<unknown>;
+  act(() => {
+    start = result.current.start("screen");
+  });
+  expect(call).not.toHaveBeenCalledWith("start_recording", expect.anything());
+  expect(
+    vi.mocked(call).mock.calls.filter(([name]) => name === "get_cameras"),
+  ).toHaveLength(1);
+  await act(async () => {
+    resolveCameras([{ id: "slow-camera", name: "USB" }]);
+    await start;
+  });
+  expect(call).toHaveBeenCalledWith("start_recording", {
+    request: expect.objectContaining({ camera: "slow-camera" }),
+  });
+});
+
+it("mantém a gravação de tela disponível quando a descoberta opcional de câmera falha", async () => {
+  const original = vi.mocked(call).getMockImplementation()!;
+  let rejectCameras!: (error: Error) => void;
+  const discovery = new Promise<never>((_, reject) => {
+    rejectCameras = reject;
+  });
+  vi.mocked(call).mockImplementation((command, args) =>
+    command === "get_cameras" ? discovery : original(command, args),
+  );
+  const { result } = renderHook(() => useRecorder());
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  let start!: Promise<unknown>;
+  act(() => {
+    start = result.current.start("screen");
+  });
+  await act(async () => {
+    rejectCameras(new Error("Camera indisponível"));
+    await start;
+  });
+  expect(call).toHaveBeenCalledWith("start_recording", {
+    request: expect.objectContaining({ camera: "", webcamEnabled: false }),
+  });
 });

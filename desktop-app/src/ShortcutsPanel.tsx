@@ -1,5 +1,12 @@
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useRef,
+  useEffect,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
 import { Keyboard, X } from "lucide-react";
 import { call, message } from "./bridge";
 
@@ -58,19 +65,29 @@ const empty: ShortcutView = {
 export function captureShortcut(
   event: KeyboardEvent<HTMLInputElement>,
 ): string | null {
-  if (!event.ctrlKey && !event.altKey && !event.metaKey) return null;
   if (
-    !/^(Key[A-Z]|Digit[0-9]|F([1-9]|1[0-2])|Space|Enter|Tab|Comma|Period|Arrow(Up|Down|Left|Right))$/.test(
-      event.code,
-    )
+    !event.code ||
+    /^(Control|Alt|Shift|Meta)(Left|Right)$/.test(event.code) ||
+    event.code === "Unidentified"
   )
     return null;
+  return withModifiers(event, event.code);
+}
+function withModifiers(
+  event: {
+    ctrlKey: boolean;
+    altKey: boolean;
+    shiftKey: boolean;
+    metaKey: boolean;
+  },
+  code: string,
+) {
   const keys = [];
   if (event.ctrlKey) keys.push("Ctrl");
   if (event.altKey) keys.push("Alt");
   if (event.shiftKey) keys.push("Shift");
   if (event.metaKey) keys.push("Super");
-  keys.push(event.code);
+  keys.push(code.replace(/^Key(?=[A-Z]$)|^Digit(?=[0-9]$)/, ""));
   return keys.join("+");
 }
 export function ShortcutsPanel() {
@@ -79,13 +96,26 @@ export function ShortcutsPanel() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const captureQueue = useRef<Promise<void>>(Promise.resolve());
+  const capture = useCallback((enabled: boolean) => {
+    const next = captureQueue.current
+      .catch(() => {})
+      .then(() => call<void>("shortcut_capture", { enabled }));
+    captureQueue.current = next;
+    return next;
+  }, []);
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     const resume = () => {
-      void call("shortcut_capture", { enabled: false }).catch(() => {});
+      void capture(false).catch(() => {});
+    };
+    const pauseFocusedField = () => {
+      if (document.activeElement?.matches("[data-shortcut-input]"))
+        void capture(true).catch(() => {});
     };
     window.addEventListener("blur", resume);
+    window.addEventListener("focus", pauseFocusedField);
     void listen<ShortcutView>("shortcuts-state", (event) => {
       if (!disposed) setView(event.payload);
     })
@@ -108,9 +138,10 @@ export function ShortcutsPanel() {
       disposed = true;
       unlisten?.();
       window.removeEventListener("blur", resume);
-      void call("shortcut_capture", { enabled: false }).catch(() => {});
+      window.removeEventListener("focus", pauseFocusedField);
+      void capture(false).catch(() => {});
     };
-  }, []);
+  }, [capture]);
   function update(action: string, value: string) {
     setDraft((previous) => ({ ...previous, [action]: value }));
     setSaved(false);
@@ -120,7 +151,7 @@ export function ShortcutsPanel() {
     setError(null);
     setSaved(false);
     try {
-      await call("shortcut_capture", { enabled: false });
+      await capture(false);
       const value = await call<ShortcutView>("save_shortcuts", {
         bindings: draft,
       });
@@ -141,9 +172,14 @@ export function ShortcutsPanel() {
       <div className="panel-heading">
         <h2 id="shortcuts-heading">
           <Keyboard size={17} />
-          Atalhos de teclado
+          Atalhos de teclado e mouse
         </h2>
       </div>
+      <p>
+        Clique no campo e pressione a tecla ou o botão do mouse desejado. Aceita
+        teclas isoladas, como F5 e Q. Os atalhos funcionam mesmo com o Tinrec
+        minimizado.
+      </p>
       {shortcutGroups.map((group) => (
         <section
           className="shortcut-group"
@@ -167,33 +203,52 @@ export function ShortcutsPanel() {
                   </div>
                   <input
                     id={`shortcut-${action}`}
+                    data-shortcut-input
                     aria-label={`Atalho: ${label}`}
                     placeholder="Não configurado"
-                    value={draft[action] ?? ""}
+                    value={(draft[action] ?? "")
+                      .replace(/\bKey([A-Z])\b/g, "$1")
+                      .replace(/\bDigit([0-9])\b/g, "$1")}
                     disabled={pending}
                     spellCheck={false}
                     maxLength={80}
-                    onFocus={() =>
-                      void call("shortcut_capture", { enabled: true }).catch(
-                        () => {},
-                      )
-                    }
+                    onFocus={() => void capture(true).catch(() => {})}
                     onBlur={() =>
-                      void call("shortcut_capture", { enabled: false }).catch(
+                      void capture(false).catch(
                         () => {},
                       )
                     }
                     onChange={(event) => update(action, event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") {
-                        event.currentTarget.blur();
+                    onContextMenu={(event) => event.preventDefault()}
+                    onMouseDown={(event: MouseEvent<HTMLInputElement>) => {
+                      if (document.activeElement !== event.currentTarget) {
+                        if (event.button !== 0) event.preventDefault();
+                        event.currentTarget.focus();
                         return;
                       }
+                      const button = [
+                        "MouseLeft",
+                        "MouseMiddle",
+                        "MouseRight",
+                        "MouseX1",
+                        "MouseX2",
+                      ][event.button];
+                      if (button) {
+                        event.preventDefault();
+                        update(action, withModifiers(event, button));
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    onAuxClick={(event) => event.preventDefault()}
+                    onKeyDown={(event) => {
                       const value = captureShortcut(event);
                       if (value) {
                         event.preventDefault();
                         event.stopPropagation();
-                        if (!event.repeat) update(action, value);
+                        if (!event.repeat) {
+                          update(action, value);
+                          event.currentTarget.blur();
+                        }
                       }
                     }}
                   />

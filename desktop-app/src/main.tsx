@@ -1,9 +1,12 @@
+import { CaptureBorder } from "./CaptureBorder";
+import { MonitorAreaWindow } from "./MonitorAreaWindow";
 import { AreaSelectionWindow } from "./AreaSelector";
-import { StrictMode } from "react";
+import { StrictMode, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { WebcamOverlay } from "./WebcamOverlay";
 import { call } from "./bridge";
+import { runInstalledTest } from "./selfTest";
 import { FloatingRecorder } from "./RecordingControls";
 import "./style.css";
 import "./workspace.css";
@@ -20,6 +23,7 @@ document.addEventListener("selectstart", (event) => {
   if (!editableTarget(event.target)) event.preventDefault();
 });
 document.addEventListener("keydown", (event) => {
+  if (event.defaultPrevented) return;
   if (
     (event.ctrlKey || event.metaKey) &&
     !event.altKey &&
@@ -44,16 +48,45 @@ document.addEventListener("keydown", (event) => {
 });
 
 const surface = new URLSearchParams(location.search).get("window");
+function DesktopReady() {
+  useEffect(() => {
+    if (!surface) void runInstalledTest();
+  }, []);
+  return null;
+}
+const captureBorder = surface === "capture-border";
+if (captureBorder)
+  document.documentElement.classList.add("capture-border-window");
 const printArea = surface === "print-area";
-const area = surface === "area" || printArea;
-if (area) document.documentElement.classList.add(printArea ? "print-window" : "area-window");
+const monitorArea = surface === "monitor-area";
+const area = surface === "area" || printArea || monitorArea;
+if (area)
+  document.documentElement.classList.add(
+    printArea ? "print-window" : "area-window",
+  );
 const floating = surface === "controls";
 const webcam = surface === "webcam";
 if (webcam) document.documentElement.classList.add("webcam-window");
 if (floating) document.documentElement.classList.add("controls-window");
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {area ? (
+    <DesktopReady />
+    {surface === "capture-fixture" ? (
+      <div
+        style={{
+          padding: 32,
+          minHeight: "100vh",
+          boxSizing: "border-box",
+          background: "#2468ac",
+        }}
+      >
+        Tinrec — captura de janela em teste
+      </div>
+    ) : captureBorder ? (
+      <CaptureBorder />
+    ) : monitorArea ? (
+      <MonitorAreaWindow />
+    ) : area ? (
       <AreaSelectionWindow />
     ) : webcam ? (
       <WebcamOverlay />

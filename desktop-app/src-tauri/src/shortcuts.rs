@@ -37,7 +37,12 @@ pub struct View {
     #[serde(default)]
     pub wayland: bool,
 }
+#[cfg(target_os = "windows")]
+#[path = "mouse_shortcuts.rs"]
+mod mouse;
 pub struct Shortcuts {
+    #[cfg(target_os = "windows")]
+    mouse: Mutex<Option<mouse::Hook>>,
     view: Mutex<View>,
     operation: tokio::sync::Mutex<()>,
     suspended: AtomicBool,
@@ -62,6 +67,8 @@ impl Shortcuts {
         }
         view.wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
         Self {
+            #[cfg(target_os = "windows")]
+            mouse: Mutex::new(None),
             view: Mutex::new(view),
             operation: tokio::sync::Mutex::new(()),
             suspended: AtomicBool::new(false),
@@ -72,9 +79,6 @@ impl Shortcuts {
     }
     pub fn view(&self) -> Reply<View> {
         Ok(lock(&self.view)?.clone())
-    }
-    pub fn suspend(&self, value: bool) {
-        self.suspended.store(value, Ordering::Release);
     }
     pub async fn apply(
         &self,
@@ -226,16 +230,21 @@ fn validate(bindings: BTreeMap<String, String>) -> Reply<BTreeMap<String, String
         if value.trim().is_empty() {
             continue;
         }
+        if let Some((mods, button)) = mouse_binding(&value)? {
+            if !cfg!(target_os = "windows") {
+                return Err("Atalhos de mouse disponíveis no Windows.".into());
+            }
+            let value = format_mouse(mods, &button);
+            if !unique.insert(value.clone()) {
+                return Err("Cada ação precisa de um atalho diferente.".into());
+            }
+            normalized.insert(action, value);
+            continue;
+        }
         let shortcut: Shortcut = value
             .parse()
             .map_err(|_| format!("Atalho inválido: {value}. Use, por exemplo, Ctrl+Shift+R."))?;
-        if !shortcut
-            .mods
-            .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
-        {
-            return Err("Use Ctrl, Alt ou Cmd junto de outra tecla.".into());
-        }
-        if !unique.insert(shortcut.id()) {
+        if !unique.insert(shortcut.to_string()) {
             return Err("Cada ação precisa de uma combinação diferente.".into());
         }
         normalized.insert(action, shortcut.to_string());
@@ -243,14 +252,27 @@ fn validate(bindings: BTreeMap<String, String>) -> Reply<BTreeMap<String, String
     Ok(normalized)
 }
 fn register(app: &tauri::AppHandle, bindings: &BTreeMap<String, String>) -> Reply<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let old = lock(&app.state::<Shortcuts>().mouse)?.take();
+        drop(old);
+    }
     app.global_shortcut()
         .unregister_all()
         .map_err(|e| e.to_string())?;
     for (action, binding) in bindings {
+        if mouse_binding(binding)?.is_some() {
+            continue;
+        }
         let action = action.clone();
         app.global_shortcut().on_shortcut(binding.as_str(), move |app, _, event| {
             if event.state == ShortcutState::Pressed { dispatch(app, &action); }
         }).map_err(|_| format!("Não foi possível registrar {binding}. A combinação pode estar em uso por outro aplicativo."))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let hook = mouse::Hook::start(app.clone(), bindings)?;
+        *lock(&app.state::<Shortcuts>().mouse)? = hook;
     }
     Ok(())
 }
@@ -299,6 +321,13 @@ fn dispatch(app: &tauri::AppHandle, action: &str) {
     if app.state::<Shortcuts>().suspended.load(Ordering::Acquire) {
         return;
     }
+    #[cfg(target_os = "windows")]
+    if let Ok(mut probe) = TEST_EVENTS.lock()
+        && let Some(events) = probe.as_mut()
+    {
+        events.push(action.into());
+        return;
+    }
     let state = app.state::<Shared>();
     if state.exiting.load(Ordering::Acquire) {
         return;
@@ -314,7 +343,10 @@ fn dispatch(app: &tauri::AppHandle, action: &str) {
         "screenshot" | "screenshot-screen" | "screenshot-window" if !snapshot.busy() => {
             let _ = app.emit_to("main", "shortcut-action", action);
         }
-        "start" | "screen" | "window" | "area" if !snapshot.busy() => {
+        "area" if !snapshot.busy() => {
+            let _ = app.emit_to("main", "shortcut-action", action);
+        }
+        "start" | "screen" | "window" if !snapshot.busy() => {
             let _ = show_recorder(app.clone());
             let _ = app.emit_to("main", "shortcut-action", action);
         }
@@ -346,8 +378,35 @@ pub fn get_shortcuts(state: tauri::State<'_, Shortcuts>) -> Reply<View> {
     state.view()
 }
 #[tauri::command]
-pub fn shortcut_capture(state: tauri::State<'_, Shortcuts>, enabled: bool) {
-    state.suspend(enabled);
+pub async fn shortcut_capture(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Shortcuts>,
+    enabled: bool,
+) -> Reply<()> {
+    let _operation = state.operation.lock().await;
+    let was_suspended = state.suspended.swap(enabled, Ordering::AcqRel);
+    if enabled {
+        #[cfg(target_os = "windows")]
+        {
+            let old = lock(&state.mouse)?.take();
+            drop(old);
+        }
+        if !state.view()?.wayland {
+            app.global_shortcut()
+                .unregister_all()
+                .map_err(|e| e.to_string())?;
+        }
+    } else if was_suspended && !state.view()?.wayland {
+        let view = state.view()?;
+        if let Err(error) = register(&app, &view.active) {
+            let mut view = lock(&state.view)?;
+            view.active.clear();
+            view.error = Some(error.clone());
+            let _ = app.emit_to("main", "shortcuts-state", &*view);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 #[tauri::command]
 pub async fn save_shortcuts(
@@ -378,15 +437,32 @@ pub fn local_shortcut(
 mod tests {
     use super::*;
     #[test]
-    fn validates_modifiers_actions_and_duplicate_aliases() {
+    fn validates_single_keys_mouse_buttons_actions_and_duplicates() {
         let bindings = BTreeMap::from([
             ("start".into(), "Ctrl+Shift+R".into()),
-            ("stop".into(), "Ctrl+Shift+S".into()),
+            ("stop".into(), "F5".into()),
+            ("pause".into(), "Q".into()),
+            ("controls".into(), "Shift+R".into()),
         ]);
-        assert_eq!(validate(bindings).unwrap().len(), 2);
+        assert_eq!(validate(bindings).unwrap().len(), 4);
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            validate(BTreeMap::from([
+                ("show".into(), "control+mousex1".into()),
+                ("stop".into(), "MouseLeft".into())
+            ]))
+            .unwrap()["show"],
+            "Ctrl+MouseX1"
+        );
         for bindings in [
-            BTreeMap::from([("start".into(), "R".into())]),
-            BTreeMap::from([("start".into(), "Shift+R".into())]),
+            BTreeMap::from([("start".into(), "MouseX3".into())]),
+            BTreeMap::from([("start".into(), "Q+MouseLeft".into())]),
+            BTreeMap::from([("start".into(), "Ctrl+Control+MouseLeft".into())]),
+            BTreeMap::from([("start".into(), "Q".into()), ("stop".into(), "KeyQ".into())]),
+            BTreeMap::from([
+                ("start".into(), "Ctrl+MouseX1".into()),
+                ("stop".into(), "Control+mousex1".into()),
+            ]),
             BTreeMap::from([("unknown".into(), "Ctrl+R".into())]),
             BTreeMap::from([
                 ("start".into(), "Ctrl+R".into()),
@@ -431,4 +507,208 @@ mod tests {
         );
         assert_eq!(portal_trigger("Ctrl+ArrowUp").as_deref(), Some("CTRL+Up"));
     }
+}
+
+fn mouse_binding(value: &str) -> Reply<Option<(Modifiers, String)>> {
+    if !value.to_ascii_lowercase().contains("mouse") {
+        return Ok(None);
+    }
+    let mut parts = value.split('+').map(str::trim).collect::<Vec<_>>();
+    let button = match parts
+        .pop()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mouseleft" => "MouseLeft",
+        "mouseright" => "MouseRight",
+        "mousemiddle" => "MouseMiddle",
+        "mousex1" => "MouseX1",
+        "mousex2" => "MouseX2",
+        _ => return Err("Botão do mouse inválido.".into()),
+    };
+    let mut mods = Modifiers::empty();
+    for part in parts {
+        let modifier = match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => Modifiers::CONTROL,
+            "alt" | "option" => Modifiers::ALT,
+            "shift" => Modifiers::SHIFT,
+            "super" | "win" | "windows" | "meta" | "cmd" | "command" => Modifiers::SUPER,
+            _ => return Err("Modificador de mouse inválido.".into()),
+        };
+        if mods.contains(modifier) {
+            return Err("Modificador repetido no atalho.".into());
+        }
+        mods |= modifier;
+    }
+    Ok(Some((mods, button.into())))
+}
+fn format_mouse(mods: Modifiers, button: &str) -> String {
+    let mut parts = Vec::new();
+    for (modifier, name) in [
+        (Modifiers::CONTROL, "Ctrl"),
+        (Modifiers::ALT, "Alt"),
+        (Modifiers::SHIFT, "Shift"),
+        (Modifiers::SUPER, "Super"),
+    ] {
+        if mods.contains(modifier) {
+            parts.push(name);
+        }
+    }
+    parts.push(button);
+    parts.join("+")
+}
+
+#[cfg(target_os = "windows")]
+static TEST_EVENTS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+#[tauri::command]
+pub async fn self_test_shortcuts(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Shortcuts>,
+) -> Reply<()> {
+    if !crate::smoke::self_test_mode() {
+        return Err("Comando exclusivo do autoteste".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::{
+            Foundation::POINT,
+            UI::{
+                Input::KeyboardAndMouse::*,
+                WindowsAndMessaging::{GetCursorPos, SetCursorPos},
+            },
+        };
+        fn key(code: u16, up: bool) -> INPUT {
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: code,
+                        wScan: 0,
+                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        }
+        fn mouse(flags: u32, data: u32) -> INPUT {
+            INPUT {
+                r#type: INPUT_MOUSE,
+                Anonymous: INPUT_0 {
+                    mi: MOUSEINPUT {
+                        dx: 0,
+                        dy: 0,
+                        mouseData: data,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        }
+        fn send(inputs: &[INPUT]) -> Reply<()> {
+            if unsafe {
+                SendInput(
+                    inputs.len() as u32,
+                    inputs.as_ptr(),
+                    std::mem::size_of::<INPUT>() as i32,
+                )
+            } != inputs.len() as u32
+            {
+                return Err("Falha ao enviar entrada para o autoteste".into());
+            }
+            Ok(())
+        }
+        let fixture = app
+            .get_webview_window("capture-fixture")
+            .ok_or("Janela de teste ausente")?;
+        fixture.set_focus().map_err(|e| e.to_string())?;
+        let p = fixture.outer_position().map_err(|e| e.to_string())?;
+        let mut cursor = POINT::default();
+        if unsafe { GetCursorPos(&mut cursor) } == 0 {
+            return Err("Posição do cursor indisponível".into());
+        }
+        if unsafe { SetCursorPos(p.x + 100, p.y + 100) } == 0 {
+            return Err("Não foi possível posicionar o cursor de teste".into());
+        }
+        let previous = state.view()?.bindings;
+        *lock(&TEST_EVENTS)? = Some(Vec::new());
+        let result: Reply<()> = async {
+            state
+                .apply(
+                    &app,
+                    BTreeMap::from([
+                        ("show".into(), "F5".into()),
+                        ("library".into(), "Q".into()),
+                        ("controls".into(), "MouseX1".into()),
+                        ("pause".into(), "Ctrl+MouseMiddle".into()),
+                    ]),
+                )
+                .await?;
+            for inputs in [
+                vec![key(VK_F5, false), key(VK_F5, true)],
+                vec![key(0x51, false), key(0x51, false), key(0x51, true)],
+                vec![mouse(MOUSEEVENTF_XDOWN, 1), mouse(MOUSEEVENTF_XUP, 1)],
+                vec![
+                    key(VK_CONTROL, false),
+                    mouse(MOUSEEVENTF_MIDDLEDOWN, 0),
+                    mouse(MOUSEEVENTF_MIDDLEUP, 0),
+                    key(VK_CONTROL, true),
+                ],
+            ] {
+                send(&inputs)?;
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+            shortcut_capture(app.clone(), app.state::<Shortcuts>(), true).await?;
+            send(&[
+                key(0x51, false),
+                key(0x51, true),
+                mouse(MOUSEEVENTF_XDOWN, 1),
+                mouse(MOUSEEVENTF_XUP, 1),
+            ])?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            if lock(&TEST_EVENTS)?.as_ref().unwrap().len() != 4 {
+                return Err("Atalho disparou durante a edição".into());
+            }
+            shortcut_capture(app.clone(), app.state::<Shortcuts>(), false).await?;
+            send(&[
+                key(0x51, false),
+                key(0x51, true),
+                mouse(MOUSEEVENTF_XDOWN, 1),
+                mouse(MOUSEEVENTF_XUP, 1),
+            ])?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let expected = vec![
+                "show", "library", "controls", "pause", "library", "controls",
+            ];
+            let events = lock(&TEST_EVENTS)?.clone().unwrap();
+            if events != expected {
+                return Err(format!("Atalhos não dispararam corretamente: {:?}", events));
+            }
+            Ok(())
+        }
+        .await;
+        state.suspended.store(false, Ordering::Release);
+        let restored = state.apply(&app, previous).await;
+        let _ = send(&[
+            key(VK_CONTROL, true),
+            key(VK_F5, true),
+            key(0x51, true),
+            mouse(MOUSEEVENTF_XUP, 1),
+            mouse(MOUSEEVENTF_MIDDLEUP, 0),
+        ]);
+        unsafe {
+            SetCursorPos(cursor.x, cursor.y);
+        }
+        *lock(&TEST_EVENTS)? = None;
+        result?;
+        restored?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, state);
+    }
+    Ok(())
 }

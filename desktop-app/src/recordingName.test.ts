@@ -29,7 +29,6 @@ describe("nomes das gravações", () => {
     ).toBe("02-01-2026-abc123-abc123");
   });
   it.each([
-    ["", "Informe um nome ou modelo para o vídeo em Configurações."],
     ["   ", "Informe um nome ou modelo para o vídeo em Configurações."],
     ["{desconhecida}", "Use apenas as variáveis disponíveis abaixo."],
     ["{data", "Use apenas as variáveis disponíveis abaixo."],

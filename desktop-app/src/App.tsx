@@ -635,7 +635,7 @@ export default function App() {
                 loading={recorder.cameraLoading}
                 onToggle={(value) => update("webcamEnabled", value)}
                 onSelect={(value) => update("camera", value)}
-                onOpen={() => void recorder.refreshCameras()}
+                onOpen={() => void recorder.refreshCameras().catch(() => {})}
               />
             </div>
             {sources?.warnings.map((warning) => (
@@ -804,7 +804,7 @@ export default function App() {
                 : sources?.platform === "macos"
                   ? "macOS"
                   : "Desktop"}{" "}
-            · v0.2
+            · v0.3
           </span>
         </footer>
       </main>

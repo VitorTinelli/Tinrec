@@ -4,6 +4,7 @@ export type Tool =
   | "pen"
   | "line"
   | "arrow"
+  | "numbered-arrow"
   | "rectangle"
   | "ellipse"
   | "text"
@@ -31,6 +32,7 @@ export interface Operation {
   color: string;
   size: number;
   text?: string;
+  number?: number;
   points?: Point[];
   image?: string;
   font?: string;
@@ -88,6 +90,7 @@ export function validateDocument(value: unknown): PrintDocument {
     "pen",
     "line",
     "arrow",
+    "numbered-arrow",
     "rectangle",
     "ellipse",
     "text",
@@ -128,6 +131,11 @@ export function validateDocument(value: unknown): PrintDocument {
     )
       throw new Error("Operação inválida no rascunho.");
     if (
+      op.tool === "numbered-arrow" &&
+      (!Number.isSafeInteger(op.number) || op.number! < 1)
+    )
+      throw new Error("Número inválido na seta.");
+    if (
       op.opacity !== undefined &&
       (!Number.isFinite(op.opacity) || op.opacity < 0 || op.opacity > 1)
     )
@@ -162,6 +170,15 @@ export function annotationBounds(doc: PrintDocument, index: number) {
     h = Math.max(Math.abs(op.h), op.size * 2),
     scale = 1,
     scaleY = 1;
+  if (op.tool === "numbered-arrow") {
+    const radius = numberedArrowRadius(op);
+    const right = Math.max(op.x + radius, op.x + op.w);
+    const bottom = Math.max(op.y + radius, op.y + op.h);
+    x = Math.min(op.x - radius, op.x + op.w);
+    y = Math.min(op.y - radius, op.y + op.h);
+    w = right - x;
+    h = bottom - y;
+  }
   if (op.tool === "callout") {
     const fontSize = Math.max(16, op.size * 3),
       labelWidth =
@@ -205,4 +222,18 @@ export function annotationBounds(doc: PrintDocument, index: number) {
     }
   }
   return { x, y, w, h, scale, scaleY };
+}
+
+export function numberedArrowRadius(op: Operation) {
+  return Math.max(14, op.size * 4);
+}
+export function nextArrowNumber(operations: Operation[]) {
+  const used = new Set(
+    operations
+      .filter((op) => op.tool === "numbered-arrow")
+      .map((op) => op.number),
+  );
+  let number = 1;
+  while (used.has(number)) number++;
+  return number;
 }
