@@ -119,6 +119,9 @@ it("does not remove a temporary video until its owner confirms Drive and the gra
     request(app)
       .get("/api/cron/temporary-cleanup")
       .set("Authorization", "Bearer cron-test-secret");
+  expect((await request(app).get("/api/cron/temporary-cleanup")).status).toBe(
+    401,
+  );
   expect((await cron()).body.removed).toBe(0);
   expect(storage.remove).not.toHaveBeenCalled();
   expect(
@@ -187,11 +190,6 @@ it("falls back to Drive when temporary storage is unavailable or its budget is f
       .reason,
   ).toBe("capacity");
   expect(storage.start).not.toHaveBeenCalled();
-});
-it("protects the cleanup job", async () => {
-  expect((await request(app).get("/api/cron/temporary-cleanup")).status).toBe(
-    401,
-  );
 });
 it("can prepare an older video without resetting its completed Drive upload", async () => {
   await db.query(

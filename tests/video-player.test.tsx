@@ -20,21 +20,11 @@ const video = {
   driveReady: false,
   canConfirmDrive: false,
 };
-it("plays the temporary MP4 while Drive is processing", () => {
-  const { container } = render(
-    <VideoPlayer video={video} publicId="id" onRefresh={() => {}} />,
-  );
-  expect(container.querySelector("video")?.getAttribute("src")).toBe(
-    video.playbackUrl,
-  );
-  expect(container.querySelector("iframe")).toBeNull();
-  expect(screen.queryByText("Testar player do Drive")).toBeNull();
-});
 it("requires the owner to test the Drive player before confirming", async () => {
   const fetch = vi.fn(async () => ({ ok: true }));
   vi.stubGlobal("fetch", fetch);
   const refresh = vi.fn();
-  const { container } = render(
+  const { container, rerender } = render(
     <VideoPlayer
       video={{ ...video, canConfirmDrive: true }}
       publicId="id"
@@ -53,13 +43,11 @@ it("requires the owner to test the Drive player before confirming", async () => 
     "/api/public/id/drive-ready",
     expect.objectContaining({ method: "POST" }),
   );
-});
-it("uses Drive after confirmation", () => {
-  const { container } = render(
+  rerender(
     <VideoPlayer
       video={{ ...video, driveReady: true }}
       publicId="id"
-      onRefresh={() => {}}
+      onRefresh={refresh}
     />,
   );
   expect(container.querySelector("video")).toBeNull();
@@ -67,12 +55,14 @@ it("uses Drive after confirmation", () => {
     video.embedUrl,
   );
 });
-
 it("preserves playback position when the signed URL is renewed", () => {
   const { container, rerender } = render(
     <VideoPlayer video={video} publicId="id" onRefresh={() => {}} />,
   );
   const element = container.querySelector("video")!;
+  expect(element.getAttribute("src")).toBe(video.playbackUrl);
+  expect(container.querySelector("iframe")).toBeNull();
+  expect(screen.queryByText("Testar player do Drive")).toBeNull();
   element.currentTime = 42;
   fireEvent.timeUpdate(element);
   rerender(

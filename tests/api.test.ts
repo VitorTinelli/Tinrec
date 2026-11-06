@@ -76,18 +76,7 @@ describe("owner boundary and public sharing", () => {
       ).status,
     ).toBe(200);
   });
-  it("creates one recording when a reservation is retried", async () => {
-    const first = await create();
-    expect(first.status).toBe(200);
-    const second = await request(app)
-      .post("/api/recordings")
-      .auth(device, { type: "bearer" })
-      .send({ id: first.body.id, title: "Atendimento", resolution: 1080 });
-    expect(second.status).toBe(200);
-    expect(second.body.publicId).toBe(first.body.publicId);
-    expect((await sql.query("SELECT * FROM recordings")).rows).toHaveLength(1);
-  });
-  it("public endpoint does not expose owner, session, upload URI or file before completion", async () => {
+  it("reuses reservations without exposing owner, session or upload data publicly", async () => {
     const r = await create();
     const publicResult = await request(app).get(
       "/api/public/" + r.body.publicId,
@@ -105,6 +94,13 @@ describe("owner boundary and public sharing", () => {
       "title",
     ]);
     expect(publicResult.body.embedUrl).toBeNull();
+    const retry = await request(app)
+      .post("/api/recordings")
+      .auth(device, { type: "bearer" })
+      .send({ id: r.body.id, title: "Atendimento", resolution: 1080 });
+    expect(retry.status).toBe(200);
+    expect(retry.body.publicId).toBe(r.body.publicId);
+    expect((await sql.query("SELECT * FROM recordings")).rows).toHaveLength(1);
   });
   it("cookie writes require same origin; device tokens cannot approve another device", async () => {
     const r = await create();
@@ -124,18 +120,6 @@ describe("owner boundary and public sharing", () => {
           .send({ code: "1234567890123456" })
       ).status,
     ).toBe(401);
-  });
-  it("does not mark an upload without a Drive file as available", async () => {
-    const r = await create();
-    expect(
-      (
-        await request(app)
-          .post(`/api/recordings/${r.body.id}/complete`)
-          .auth(device, { type: "bearer" })
-          .send({})
-      ).status,
-    ).toBe(409);
-    expect(drive.complete).not.toHaveBeenCalled();
   });
   it("bounds progress and prevents file replacement during retry", async () => {
     const r = await create();
@@ -158,8 +142,17 @@ describe("owner boundary and public sharing", () => {
       ).status,
     ).toBe(400);
   });
-  it("returns an embed only after server-side completion succeeds", async () => {
+  it("publishes an embed only after a Drive file is verified by the server", async () => {
     const r = await create();
+    expect(
+      (
+        await request(app)
+          .post(`/api/recordings/${r.body.id}/complete`)
+          .auth(device, { type: "bearer" })
+          .send({})
+      ).status,
+    ).toBe(409);
+    expect(drive.complete).not.toHaveBeenCalled();
     await sql.query(
       "UPDATE recordings SET size_bytes=100,drive_file_id='123' WHERE id=$1",
       [r.body.id],
