@@ -1,25 +1,17 @@
-name: Tinrec desktop
+name: Windows desktop
 on:
   push:
-    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/test-desktop.py', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
+    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/*windows*.ps1', 'package*.json', '.github/workflows/desktop.yml']
   pull_request:
-    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/test-desktop.py', 'package.json', 'package-lock.json', '.github/workflows/desktop.yml']
+    paths: ['desktop-app/**', 'desktop-rust/**', 'scripts/*windows*.ps1', 'package*.json', '.github/workflows/desktop.yml']
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            bundle: deb
-          - os: windows-latest
-            bundle: nsis
-          - os: macos-15
-            bundle: app
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,57 +21,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Linux dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libdbus-1-dev libayatana-appindicator3-dev clang libwebkit2gtk-4.1-dev libpipewire-0.3-dev libasound2-dev librsvg2-dev ffmpeg webkit2gtk-driver xvfb
-      - name: macOS encoder
-        if: runner.os == 'macOS'
-        run: brew install ffmpeg
-      - name: Windows encoder
-        if: runner.os == 'Windows'
-        run: choco install ffmpeg -y --no-progress
-      - name: Stage Windows encoder resources
-        if: runner.os == 'Windows'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-app/src-tauri
+      - name: Prepare pinned encoder
         shell: pwsh
         run: |
-          $encoder = Get-ChildItem "$env:ChocolateyInstall/lib/ffmpeg*/tools" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          if (!$encoder) { throw 'FFmpeg executable not found' }
-          $encoder.DirectoryName | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
-          $destination = 'desktop-app/src-tauri/resources/windows'
-          New-Item -ItemType Directory -Force "$destination/bin", "$destination/licenses" | Out-Null
-          Copy-Item $encoder.FullName "$destination/bin/ffmpeg.exe"
-          Copy-Item (Join-Path $encoder.DirectoryName 'ffprobe.exe') "$destination/bin/ffprobe.exe"
-          Copy-Item (Join-Path (Split-Path $encoder.DirectoryName -Parent) 'LICENSE') "$destination/licenses/FFmpeg-LICENSE.txt"
+          ./scripts/prepare-windows-ffmpeg.ps1
+          (Resolve-Path desktop-app/src-tauri/resources/windows/bin).Path | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
       - run: npm ci
       - run: npm run desktop:web:build
+      - run: npx vitest run desktop-app/src --maxWorkers=1
       - run: cargo fmt --manifest-path desktop-app/src-tauri/Cargo.toml --check
+      - run: cargo fmt --manifest-path desktop-rust/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path desktop-app/src-tauri/Cargo.toml --all-targets --features custom-protocol -- -D warnings
-      - name: Desktop backend tests
-        timeout-minutes: 10
-        run: cargo test --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol -- --include-ignored --nocapture --test-threads=1
-      - name: Native Linux interface test
-        timeout-minutes: 10
-        if: runner.os == 'Linux'
-        env:
-          WEBKIT_DISABLE_DMABUF_RENDERER: '1'
-          WEBKIT_DISABLE_COMPOSITING_MODE: '1'
-          LIBGL_ALWAYS_SOFTWARE: '1'
+      - run: cargo clippy --locked --manifest-path desktop-rust/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol -- --include-ignored --test-threads=1
+      - run: cargo test --locked --manifest-path desktop-rust/Cargo.toml -- --include-ignored --test-threads=1
+      - name: Build installer
+        run: npm run desktop:package -- --bundles nsis
+      - name: Test existing-installation guard
+        shell: pwsh
+        run: ./scripts/test-windows-installed-guard.ps1
+      - name: Test installed application and WebView IPC
+        shell: pwsh
         run: |
-          cargo install tauri-driver --locked
-          cargo build --locked --manifest-path desktop-app/src-tauri/Cargo.toml --features custom-protocol
-          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --controls --artifacts artifacts/desktop-controls
-          dbus-run-session -- xvfb-run -a python3 scripts/test-desktop.py --background --artifacts artifacts/desktop-background
-      - name: Upload native test diagnostics
-        if: always() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
-        with:
-          name: desktop-test-diagnostics
-          path: artifacts/desktop-*
-          if-no-files-found: ignore
-      - name: Build native package
-        run: npm run desktop:package -- --bundles ${{ matrix.bundle }}
+          $installer = Get-ChildItem desktop-app/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (!$installer) { throw 'Installer missing' }
+          ./scripts/test-windows-installed.ps1 -Installer $installer.FullName
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: tinrec-desktop-${{ matrix.os }}
-          path: desktop-app/src-tauri/target/release/bundle/**
-          if-no-files-found: error
+          name: Tinrec-Windows-x64
+          path: |
+            desktop-app/src-tauri/target/release/bundle/nsis/*-setup.exe
+            .tools/installed-test-*/data/self-test-result.json
+          if-no-files-found: warn
