@@ -63,8 +63,7 @@ pub fn devices(ffmpeg: &Path) -> Result<Vec<Device>> {
         cmd.args(["dshow", "-i", "dummy"]);
         #[cfg(target_os = "macos")]
         cmd.args(["avfoundation", "-i", ""]);
-        let output = cmd
-            .output()
+        let output = crate::process::output(&mut cmd, Duration::from_secs(5))
             .context("Não foi possível listar câmeras pelo FFmpeg")?;
         Ok(parse_devices(
             &String::from_utf8_lossy(&output.stderr),
@@ -298,7 +297,7 @@ impl Drop for Camera {
 mod tests {
     use super::*;
     #[test]
-    fn decodes_camera_pipeline_from_generated_input_and_stops_the_child() {
+    fn camera_and_square_webcam_decode_pixels_and_release_the_child() {
         use clap::Parser;
         #[derive(clap::Parser)]
         struct Arguments {
@@ -308,72 +307,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("camera.mp4");
         let options = Arguments::parse_from(["test", "--output", output.to_str().unwrap()]).options;
-        let mut cmd = command(&options.ffmpeg);
-        cmd.args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-re",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=blue:s=320x240:r=30",
-        ]);
-        let mut camera = Camera::from_input(cmd, &options, BackendPreference::Auto, None).unwrap();
-        eprintln!("camera decoder started: pid={}", camera.child.id());
-        let frame = match camera.next_event(Some(Duration::from_secs(5))).unwrap() {
-            CaptureEvent::Video(frame) => frame,
-            _ => panic!("Expected video"),
-        };
-        assert_eq!((frame.width, frame.height), (1280, 720));
-        let bytes = frame.to_tight_bytes().unwrap();
-        let center = (360 * 1280 + 640) * 4;
-        assert!(bytes[center] > 240 && bytes[center + 1] < 10 && bytes[center + 2] < 10);
-        assert_eq!(&bytes[..3], &[0, 0, 0]);
-        eprintln!("camera frame verified; stopping decoder");
-        camera.stop().unwrap();
-        eprintln!("camera decoder stopped");
-        assert!(camera.child.try_wait().unwrap().is_some());
-        assert!(camera.reader.is_none());
-    }
-    #[test]
-    fn square_webcam_decoder_can_release_and_reopen_the_same_recording() {
-        use clap::Parser;
-        #[derive(clap::Parser)]
-        struct Arguments {
-            #[command(flatten)]
-            options: crate::RecordOptions,
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("toggle.mp4");
-        let options = Arguments::parse_from(["test", "--output", output.to_str().unwrap()]).options;
-        for _ in 0..2 {
-            let mut cmd = command(&options.ffmpeg);
-            cmd.args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-re",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=blue:s=640x360:r=30",
-            ]);
-            let mut camera =
-                Camera::from_input(cmd, &options, BackendPreference::Auto, Some(320)).unwrap();
-            let CaptureEvent::Video(frame) =
-                camera.next_event(Some(Duration::from_secs(5))).unwrap()
-            else {
-                panic!("Expected webcam frame")
-            };
-            assert_eq!((frame.width, frame.height), (320, 320));
-            let bytes = frame.to_tight_bytes().unwrap();
-            assert!(bytes[0] > 240 && bytes[1] < 10 && bytes[2] < 10);
-            camera.stop().unwrap();
-            assert!(camera.child.try_wait().unwrap().is_some());
-            assert!(camera.reader.is_none());
+        for (square, source, sessions) in [(None, "320x240", 1), (Some(320), "640x360", 2)] {
+            for _ in 0..sessions {
+                let mut cmd = command(&options.ffmpeg);
+                cmd.args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostdin",
+                    "-re",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg(format!("color=blue:s={source}:r=30"));
+                let mut camera =
+                    Camera::from_input(cmd, &options, BackendPreference::Auto, square).unwrap();
+                let CaptureEvent::Video(frame) =
+                    camera.next_event(Some(Duration::from_secs(5))).unwrap()
+                else {
+                    panic!("Expected camera frame: square={square:?}")
+                };
+                let bytes = frame.to_tight_bytes().unwrap();
+                let pixel = if square.is_some() {
+                    assert_eq!((frame.width, frame.height), (320, 320));
+                    &bytes[..3]
+                } else {
+                    assert_eq!((frame.width, frame.height), (1280, 720));
+                    assert_eq!(&bytes[..3], &[0, 0, 0], "letterbox must stay black");
+                    &bytes[(360 * 1280 + 640) * 4..][..3]
+                };
+                assert!(
+                    pixel[0] > 240 && pixel[1] < 10 && pixel[2] < 10,
+                    "{square:?}: {pixel:?}"
+                );
+                camera.stop().unwrap();
+                assert!(camera.child.try_wait().unwrap().is_some());
+                assert!(camera.reader.is_none());
+            }
         }
     }
     #[test]

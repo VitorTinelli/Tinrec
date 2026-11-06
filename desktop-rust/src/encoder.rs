@@ -17,7 +17,7 @@ use std::{
 pub struct Packet {
     pub track: u8,
     pub pts_ms: u64,
-    pub data: Vec<u8>,
+    pub data: Arc<Vec<u8>>,
 }
 pub struct Encoder {
     child: Child,
@@ -26,6 +26,7 @@ pub struct Encoder {
     partial: PathBuf,
     output: PathBuf,
     pending_video: Arc<AtomicUsize>,
+    pub name: &'static str,
 }
 pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -89,17 +90,34 @@ impl Encoder {
             let microphone_index = if audio.len() == 2 { 2 } else { 0 };
             cmd.arg(format!("-ac:a:{microphone_index}")).arg("1");
         }
+        let hardware = crate::encoding::hardware(ffmpeg, width, height, resolution);
+        if hardware {
+            cmd.args([
+                "-c:v",
+                "h264_mf",
+                "-hw_encoding",
+                "1",
+                "-rate_control",
+                "cbr",
+                "-b:v",
+                if resolution == 720 {
+                    "2500000"
+                } else {
+                    "5000000"
+                },
+            ]);
+        } else {
+            cmd.args([
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "2",
+            ]);
+        }
+        // Damage-driven VFR timestamps are irregular. Avoid reordered B-frame
+        // DTS making the MP4 stream duration shorter than its final visible PTS.
         cmd.args([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "23",
-            "-threads",
-            "2",
+            "-bf",
+            "0",
             "-pix_fmt",
-            "yuv420p",
+            if hardware { "nv12" } else { "yuv420p" },
             "-fps_mode",
             "vfr",
             "-vf",
@@ -156,6 +174,7 @@ impl Encoder {
             partial,
             output: output.to_owned(),
             pending_video,
+            name: if hardware { "h264_mf" } else { "libx264" },
         })
     }
     pub fn pid(&self) -> u32 {
@@ -224,9 +243,7 @@ impl Encoder {
             thread::sleep(Duration::from_millis(20));
         }
         // Atomic no-clobber publication on the same filesystem.
-        std::fs::hard_link(&self.partial, &self.output)
-            .context("Não foi possível publicar o MP4 sem sobrescrever o destino")?;
-        std::fs::remove_file(&self.partial)?;
+        crate::platform::publish_file(&self.partial, &self.output)?;
         Ok(())
     }
 }
@@ -244,28 +261,33 @@ impl Drop for Encoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     #[ignore = "requires FFmpeg and ffprobe"]
-    fn sparse_video_final_frame_does_not_extend_the_recording() {
+    fn irregular_damage_frames_keep_the_container_end_at_the_visible_end() {
         let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("still.mp4");
+        let output = dir.path().join("irregular.mp4");
         let encoder = Encoder::start(&output, Path::new("ffmpeg"), 64, 64, 720, &[], None).unwrap();
-        for pts_ms in [0, 1000, 3000, 3999] {
+        for pts_ms in [0, 1333, 1366, 2366, 3400, 4400, 5400, 6333, 7366, 7999] {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while encoder.pending_video.load(Ordering::Relaxed) >= 4 {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
             assert!(
                 encoder
                     .send(Packet {
                         track: 1,
                         pts_ms,
-                        data: vec![0; 64 * 64 * 4],
+                        data: Arc::new(vec![0; 64 * 64 * 4])
                     })
                     .unwrap()
             );
         }
         encoder.finish().unwrap();
         let probe = crate::diagnostics::probe(Path::new("ffprobe"), &output).unwrap();
-        let checks = crate::diagnostics::check(&probe, 4.0, 0).unwrap();
+        let checks = crate::diagnostics::check(&probe, 8., 0).unwrap();
         assert!(checks.passed, "{checks:?}");
+        assert!(checks.duration_error_seconds < 0.05);
     }
 
     #[test]
@@ -295,7 +317,7 @@ mod tests {
                 let packet = Packet {
                     track: 1,
                     pts_ms: tick * 10,
-                    data: vec![0; 64 * 64 * 4],
+                    data: Arc::new(vec![0; 64 * 64 * 4]),
                 };
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while encoder.pending_video.load(Ordering::Relaxed) >= 4 {
@@ -312,7 +334,7 @@ mod tests {
                     .send(Packet {
                         track: track.number,
                         pts_ms: tick * 10,
-                        data: vec![0; 480 * usize::from(track.channels) * 4],
+                        data: Arc::new(vec![0; 480 * usize::from(track.channels) * 4]),
                     })
                     .unwrap();
             }

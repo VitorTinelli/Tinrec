@@ -48,6 +48,19 @@ pub fn probe(ffprobe: &Path, file: &Path) -> Result<Value> {
     probe_metadata(ffprobe, file, true)
 }
 pub fn probe_metadata(ffprobe: &Path, file: &Path, count_frames: bool) -> Result<Value> {
+    probe_with_timeout(
+        ffprobe,
+        file,
+        count_frames,
+        std::time::Duration::from_secs(if count_frames { 600 } else { 30 }),
+    )
+}
+fn probe_with_timeout(
+    ffprobe: &Path,
+    file: &Path,
+    count_frames: bool,
+    timeout: std::time::Duration,
+) -> Result<Value> {
     let mut command = Command::new(ffprobe);
     #[cfg(target_os = "windows")]
     {
@@ -57,7 +70,7 @@ pub fn probe_metadata(ffprobe: &Path, file: &Path, count_frames: bool) -> Result
     if count_frames {
         command.arg("-count_frames");
     }
-    let output = command
+    command
         .args([
             "-v",
             "error",
@@ -66,9 +79,9 @@ pub fn probe_metadata(ffprobe: &Path, file: &Path, count_frames: bool) -> Result
             "-of",
             "json",
         ])
-        .arg(file)
-        .output()
-        .context("Não foi possível executar ffprobe")?;
+        .arg(file);
+    let output = crate::process::output(&mut command, timeout)
+        .context("Não foi possível concluir a inspeção ffprobe no tempo limite")?;
     if !output.status.success() {
         bail!("ffprobe: {}", String::from_utf8_lossy(&output.stderr));
     }
@@ -130,4 +143,32 @@ pub fn check(probe: &Value, expected_duration: f64, expected_audio: usize) -> Re
             && audio.len() == expected_audio,
         limitation: "Checagens técnicas de duração e trilhas; contagem obtida por decodificação ou metadados do contêiner; não comprovam audibilidade, sincronização perceptiva, fluidez ou estabilidade de memória em teste prolongado.",
     })
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod timeout_tests {
+    use super::*;
+    #[test]
+    fn hung_probe_is_terminated_without_blocking_finalization() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("slow-probe.cmd");
+        std::fs::write(
+            &program,
+            b"@echo off
+:wait
+goto wait
+",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let error = probe_with_timeout(
+            &program,
+            &dir.path().join("capture.mp4"),
+            false,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("excedeu o tempo limite"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+    }
 }

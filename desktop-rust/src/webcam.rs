@@ -12,6 +12,9 @@ pub struct Webcam {
     height: u32,
 }
 impl Webcam {
+    pub fn composites_frame(&self) -> bool {
+        self.enabled && self.draw
+    }
     pub fn start(
         options: &crate::RecordOptions,
         synthetic: bool,

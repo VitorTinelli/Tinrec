@@ -13,7 +13,7 @@ use pinray::{
 use serde::Serialize;
 use std::{
     io::{self, BufRead},
-    sync::{atomic::Ordering, mpsc},
+    sync::{Arc, atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -29,6 +29,10 @@ pub struct Report {
     pub wall_seconds: f64,
     pub captured_video_frames: u64,
     pub submitted_video_frames: u64,
+    pub encoder_video_bytes: u64,
+    pub encoder: String,
+    pub encoder_requested: String,
+    pub encoder_fallback: Option<String>,
     pub encoder_dropped_video_frames: u64,
     pub repeated_video_frames: u64,
     pub native_gap_events: u64,
@@ -162,10 +166,10 @@ fn audio_packets(
             packets.push(Packet {
                 track,
                 pts_ms: mapped.as_millis() as u64,
-                data: Vec::new(),
+                data: Arc::new(Vec::new()),
             });
         }
-        packets.last_mut().unwrap().data.extend_from_slice(sample);
+        Arc::make_mut(&mut packets.last_mut().unwrap().data).extend_from_slice(sample);
         previous_index = Some(i);
     }
     packets
@@ -210,6 +214,27 @@ fn resize_preview(
     })
 }
 
+fn crop_frame(
+    data: Arc<Vec<u8>>,
+    dimensions: (u32, u32),
+    crop: Option<pinray::Rect>,
+) -> Result<Arc<Vec<u8>>> {
+    let Some(rect) = crop else {
+        return Ok(data);
+    };
+    validate_crop(rect, dimensions.0, dimensions.1)?;
+    let stride = dimensions.0 as usize * 4;
+    if data.len() != stride * dimensions.1 as usize {
+        bail!("Quadro inválido para recorte");
+    }
+    let mut pixels = Vec::with_capacity(rect.width as usize * rect.height as usize * 4);
+    for y in rect.y as usize..rect.y as usize + rect.height as usize {
+        let start = y * stride + rect.x as usize * 4;
+        pixels.extend_from_slice(&data[start..start + rect.width as usize * 4]);
+    }
+    Ok(Arc::new(pixels))
+}
+
 struct Sink<'a> {
     encoder: Option<Encoder>,
     webcam: Option<crate::webcam::Webcam>,
@@ -218,7 +243,7 @@ struct Sink<'a> {
     timeline: Timeline,
     limit: Duration,
     report: Report,
-    last_frame: Option<Vec<u8>>,
+    last_frame: Option<Arc<Vec<u8>>>,
     last_video_pts: Option<u64>,
     dimensions: (u32, u32),
     last_audio_pts: [Option<u64>; 2],
@@ -230,11 +255,16 @@ struct Sink<'a> {
     webcam_preview_at: Option<Duration>,
 }
 impl Sink<'_> {
-    fn video(&mut self, at: Duration, mut data: Vec<u8>) -> Result<()> {
+    fn video(&mut self, at: Duration, data: Vec<u8>) -> Result<()> {
+        let mut data = Arc::new(data);
         let background = data.clone();
         if let Some(webcam) = &mut self.webcam {
             webcam.paint(
-                &mut data,
+                if webcam.composites_frame() {
+                    Arc::make_mut(&mut data).as_mut_slice()
+                } else {
+                    &mut []
+                },
                 self.dimensions.0,
                 self.dimensions.1,
                 self.viewport,
@@ -268,6 +298,8 @@ impl Sink<'_> {
             return Ok(());
         }
         self.last_frame = Some(background);
+        let data = crop_frame(data, self.dimensions, self.viewport)?;
+        let bytes = data.len() as u64;
         if self.encoder.as_ref().unwrap().send(Packet {
             track: 1,
             pts_ms: pts,
@@ -275,6 +307,7 @@ impl Sink<'_> {
         })? {
             self.last_video_pts = Some(pts);
             self.report.submitted_video_frames += 1;
+            self.report.encoder_video_bytes += bytes;
         } else {
             self.report.encoder_dropped_video_frames += 1;
         }
@@ -312,7 +345,7 @@ impl Sink<'_> {
             } else {
                 f32::from(self.volumes[index]) / 100.0
             };
-            for value in packet.data.as_chunks_mut::<4>().0 {
+            for value in Arc::make_mut(&mut packet.data).as_chunks_mut::<4>().0 {
                 let scaled = f32::from_le_bytes(*value) * gain;
                 *value = scaled.to_le_bytes();
                 self.report.audio_peak[index] = self.report.audio_peak[index].max(scaled.abs());
@@ -331,7 +364,7 @@ impl Sink<'_> {
             })
             && let Some(last) = self.last_frame.clone()
         {
-            self.video(elapsed, last)?;
+            self.video(elapsed, last.as_ref().clone())?;
             self.report.captured_video_frames -= 1;
             self.report.repeated_video_frames += 1;
         }
@@ -344,12 +377,17 @@ impl Sink<'_> {
             .context("Nenhum quadro recebido da captura")?;
         if let Some(webcam) = &mut self.webcam {
             webcam.paint(
-                &mut data,
+                if webcam.composites_frame() {
+                    Arc::make_mut(&mut data).as_mut_slice()
+                } else {
+                    &mut []
+                },
                 self.dimensions.0,
                 self.dimensions.1,
                 self.viewport,
             )?;
         }
+        let data = crop_frame(data, self.dimensions, self.viewport)?;
         let pts = active.as_millis().saturating_sub(1) as u64;
         if self.last_video_pts.is_none_or(|p| pts > p) {
             // Finish only after pending packets have drained. Audio overload still fails.
@@ -360,6 +398,7 @@ impl Sink<'_> {
                     data: data.clone(),
                 })? {
                     self.report.submitted_video_frames += 1;
+                    self.report.encoder_video_bytes += data.len() as u64;
                     self.report.repeated_video_frames += 1;
                     return Ok(());
                 }
@@ -547,6 +586,17 @@ fn validate_crop(rect: pinray::Rect, width: u32, height: u32) -> Result<()> {
     }
     Ok(())
 }
+fn preserve_failed_recording(
+    encoder: Encoder,
+    error: anyhow::Error,
+    output: &std::path::Path,
+) -> anyhow::Error {
+    match encoder.finish() {
+        Ok(()) => error.context(format!("A captura foi interrompida. O vídeo já recebido foi finalizado e preservado em {}", output.display())),
+        Err(recovery) => error.context(format!("A captura falhou e o encoder não conseguiu finalizar o vídeo: {recovery:#}. Confira o arquivo parcial e o log")),
+    }
+}
+
 fn run_inner(
     options: &crate::RecordOptions,
     synthetic: bool,
@@ -556,6 +606,7 @@ fn run_inner(
     preview: Option<&dyn Fn(PreviewFrame)>,
     webcam_preview: Option<&dyn Fn(PreviewFrame)>,
 ) -> Result<()> {
+    crate::encoding::prepare(&options.ffmpeg);
     if options.capture_mode == "area" && options.crop.is_none() && preview.is_none() {
         bail!("Na CLI, informe --crop x,y,largura,altura para gravar uma área.");
     }
@@ -564,7 +615,7 @@ fn run_inner(
     } else {
         eprintln!("Solicitando captura. No Wayland, selecione a tela no diálogo do sistema.");
         let backend = match options.backend.as_str() {
-            "auto" => BackendPreference::Auto,
+            "auto" => crate::platform::capture_backend(),
             "x11" => BackendPreference::LinuxX11,
             "wayland" => BackendPreference::LinuxWaylandPortal,
             "wgc" => BackendPreference::WindowsWgc,
@@ -770,13 +821,19 @@ fn run_inner(
     let encoder = Encoder::start(
         &options.output,
         &options.ffmpeg,
-        dimensions.0,
-        dimensions.1,
+        crop.map_or(dimensions.0, |r| r.width),
+        crop.map_or(dimensions.1, |r| r.height),
         options.resolution,
         &tracks,
-        crop,
+        None,
     )?;
     let mut meter = Meter::new(encoder.pid());
+    report.encoder = encoder.name.into();
+    report.encoder_requested =
+        std::env::var("TINREC_ENCODER").unwrap_or_else(|_| "software".into());
+    if report.encoder_requested == "mf" && encoder.name == "libx264" {
+        report.encoder_fallback = Some("Media Foundation está suspenso até haver recuperação sem perda de frames; usando libx264.".into());
+    }
     let mut sink = Sink {
         encoder: Some(encoder),
         webcam,
@@ -1011,10 +1068,42 @@ fn run_inner(
             serde_json::to_vec_pretty(&probe)?,
         )?;
         if !sink.report.checks.as_ref().unwrap().passed {
-            bail!("MP4 produzido, mas checagens de duração/trilhas falharam; confira o relatório.");
+            let checks = sink.report.checks.as_ref().unwrap();
+            bail!(
+                "O vídeo foi preservado, mas não passou na verificação: diferença de duração {:.3} s; diferença áudio/vídeo {:.3} s; trilhas de áudio {}/{}. Abra a pasta e confira o relatório .capture.json.",
+                checks.duration_error_seconds,
+                checks.max_audio_video_end_difference_seconds,
+                checks.actual_audio_tracks,
+                checks.expected_audio_tracks
+            );
         }
         Ok(())
     })();
+    let outcome = match outcome {
+        Err(error) => {
+            if let Some(encoder) = sink.encoder.take() {
+                let stopped_at = epoch.elapsed();
+                sink.report.wall_seconds = stopped_at.as_secs_f64();
+                sink.report.active_seconds = sink
+                    .timeline
+                    .active(stopped_at)
+                    .min(sink.limit)
+                    .as_secs_f64();
+                on_progress(Progress {
+                    state: "finalizing",
+                    active_seconds: sink.report.active_seconds,
+                    video_frames: sink.report.submitted_video_frames,
+                    audio_peak: sink.report.audio_peak,
+                    microphone_muted: false,
+                    system_muted: false,
+                });
+                Err(preserve_failed_recording(encoder, error, &options.output))
+            } else {
+                Err(error)
+            }
+        }
+        Ok(()) => Ok(()),
+    };
     if sink.report.wall_seconds == 0.0 {
         sink.report.wall_seconds = epoch.elapsed().as_secs_f64();
         sink.report.active_seconds = sink
@@ -1061,6 +1150,80 @@ fn synthetic_audio(index: u64, frequency: f64, channels: u16) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires FFmpeg and ffprobe"]
+    fn source_failure_preserves_a_playable_video_and_the_original_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("recovered.mp4");
+        let encoder = Encoder::start(
+            &output,
+            std::path::Path::new("ffmpeg"),
+            64,
+            64,
+            720,
+            &[],
+            None,
+        )
+        .unwrap();
+        for pts_ms in [0, 500, 999] {
+            assert!(
+                encoder
+                    .send(Packet {
+                        track: 1,
+                        pts_ms,
+                        data: Arc::new(vec![0; 64 * 64 * 4])
+                    })
+                    .unwrap()
+            );
+        }
+        let error = preserve_failed_recording(
+            encoder,
+            anyhow::anyhow!("dispositivo desconectado"),
+            &output,
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("dispositivo desconectado"));
+        assert!(message.contains("preservado"));
+        assert!(message.contains(&output.display().to_string()));
+        let probe = diagnostics::probe(std::path::Path::new("ffprobe"), &output).unwrap();
+        assert!(diagnostics::check(&probe, 1., 0).unwrap().passed);
+        assert!(!crate::encoder::sidecar(&output, ".partial.mp4").exists());
+    }
+    #[test]
+    fn crop_preserves_pixels_and_uncropped_frames_share_the_buffer() {
+        let frame = Arc::new((0..6u8).flat_map(|n| [n, n, n, 255]).collect::<Vec<_>>());
+        let same = crop_frame(frame.clone(), (3, 2), None).unwrap();
+        assert!(Arc::ptr_eq(&frame, &same));
+        let crop = crop_frame(
+            frame.clone(),
+            (3, 2),
+            Some(pinray::Rect {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 2,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            crop.as_ref(),
+            &vec![1, 1, 1, 255, 2, 2, 2, 255, 4, 4, 4, 255, 5, 5, 5, 255]
+        );
+        assert_eq!(frame.len(), 24);
+        assert!(
+            crop_frame(
+                frame,
+                (3, 2),
+                Some(pinray::Rect {
+                    x: 2,
+                    y: 0,
+                    width: 2,
+                    height: 2
+                })
+            )
+            .is_err()
+        );
+    }
     #[test]
     #[cfg(target_os = "windows")]
     fn qpc_capture_clock_does_not_shift_buffered_frames_to_arrival_time() {

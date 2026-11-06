@@ -89,6 +89,7 @@ fn mp4_pipeline_all_audio_modes_pause_tones_and_no_clobber() {
         );
         let report = read_report(&output);
         assert_eq!(report["mode"], "synthetic");
+        assert_eq!(report["encoder"], "libx264");
         assert_eq!(report["status"], "completed");
         assert_eq!(report["checks"]["passed"], true);
         assert!(report["wall_seconds"].as_f64().unwrap() >= 1.6);

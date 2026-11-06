@@ -252,6 +252,10 @@ fn area_selection_happens_before_recording_and_output_is_cropped() {
     .unwrap();
     assert_eq!(report.status, "completed", "{:?}", report.error);
     assert!(report.active_seconds < 0.7);
+    assert_eq!(
+        report.encoder_video_bytes,
+        report.submitted_video_frames * 161 * 160 * 4
+    );
     let probe = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -294,50 +298,13 @@ fn cancelling_area_selection_does_not_create_a_video() {
 
 #[test]
 #[ignore = "requires FFmpeg and ffprobe"]
-fn webcam_is_embedded_inside_the_cropped_video() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = dir.path().join("webcam.mp4");
-    let mut config = options(&output);
-    config.capture_mode = "area".into();
-    config.crop = Some("100,50,320,240".into());
-    config.webcam = Some("generated".into());
-    config.system_audio = false;
-    config.microphone = false;
-    config.duration = 0.5;
-    let (_sender, receiver) = mpsc::channel();
-    let report = recording::run_controlled(&config, true, receiver, |_| {}).unwrap();
-    assert_eq!(report.status, "completed", "{:?}", report.error);
-    let decoded = std::process::Command::new("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(&output)
-        .args([
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "pipe:1",
-        ])
-        .output()
-        .unwrap();
-    assert!(decoded.status.success());
-    assert_eq!(decoded.stdout.len(), 960 * 720 * 3);
-    let center = (630 * 960 + 90) * 3;
-    let pixel = &decoded.stdout[center..center + 3];
-    assert!(
-        pixel[0] < 20 && pixel[1] < 20 && pixel[2] > 230,
-        "{pixel:?}"
-    );
-}
-
-#[test]
-#[ignore = "requires FFmpeg and ffprobe"]
-fn webcam_can_toggle_move_and_toggle_back_during_recording() {
+fn webcam_is_cropped_and_can_toggle_move_and_toggle_back() {
     use std::cell::Cell;
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("webcam-controls.mp4");
     let mut config = options(&output);
+    config.capture_mode = "area".into();
+    config.crop = Some("100,50,320,240".into());
     config.webcam = Some("generated".into());
     config.webcam_disabled = true;
     config.system_audio = false;
@@ -395,9 +362,9 @@ fn webcam_can_toggle_move_and_toggle_back_during_recording() {
             .output()
             .unwrap();
         assert!(decoded.status.success());
-        assert_eq!(decoded.stdout.len(), 1280 * 720 * 3);
-        for (x, y, expected) in [(90, 630, bottom_left), (1190, 90, top_right)] {
-            let offset = (y * 1280 + x) * 3;
+        assert_eq!(decoded.stdout.len(), 960 * 720 * 3);
+        for (x, y, expected) in [(90, 630, bottom_left), (870, 90, top_right)] {
+            let offset = (y * 960 + x) * 3;
             let pixel = &decoded.stdout[offset..offset + 3];
             let blue = pixel[0] < 20 && pixel[1] < 20 && pixel[2] > 230;
             assert_eq!(blue, expected, "t={time}, ({x},{y}), {pixel:?}");
