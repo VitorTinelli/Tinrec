@@ -360,11 +360,21 @@ Windows e macOS mantêm Tela, Janela e Área. O backend macOS Pinray 0.2.7 usa S
 
 ## Prints
 
+Ao concluir o envio de um print no Windows, o Tinrec copia o link para a área de transferência e mostra a notificação **Print enviado**. Clicar na notificação abre o link no site. O navegador não é aberto automaticamente; envios ainda na fila não geram aviso de conclusão.
+
+Ao selecionar **Seta numerada**, o campo **Próximo número** permite digitar o número inicial ou ajustá-lo pelos botões −/+. Após desenhar, ele avança automaticamente; desfazer recupera o número da seta removida. Os atalhos padrão **N** (aumentar) e **Shift+N** (diminuir) funcionam com a ferramenta selecionada e podem ser alterados em Ferramentas dos prints. É possível repetir um número ajustando o campo antes de desenhar outra seta.
+
+Os botões e os atalhos globais abrem uma janela independente para escolher a fonte, sem restaurar a janela principal quando ela está minimizada ou na bandeja. Com um único monitor, Tela captura diretamente. Depois da escolha, a janela pequena é fechada ao concluir ou cancelar o editor flutuante.
+
+As ferramentas têm atalhos locais configuráveis em **Configurações → Atalhos de teclado e mouse → Ferramentas dos prints**. Clique no campo, pressione uma letra (com Shift opcional) e use **Salvar atalhos**. Atalhos repetidos são recusados; é possível remover uma atribuição. Eles funcionam somente no editor, sem interferir em campos de texto.
+
+Padrões: V selecionar, P desenhar, A seta, Shift+A seta numerada, L linha, R retângulo, E elipse, T texto, Q chamada, H destacar, B ocultar/preencher, F desfocar, C recortar, G cinza e I inverter cores. O editor compacto usa os atalhos das ferramentas que oferece; os demais ficam disponíveis no editor completo. Passe o mouse sobre uma ferramenta para consultar seu atalho.
+
 No Gravador, use o seletor **Vídeo / Print** e clique em Tela, Janela ou Área.
 Os prints salvos ficam em **Prints**, no menu lateral. Para Área, selecione o recorte e use a barra flutuante sobre a captura para
 anotar, copiar ou enviar ao site. Não abre outra tela de edição. Copiar usa só
 o clipboard; enviar salva o PNG final na subpasta `Prints` e agenda o upload.
-Tela e Janela continuam com cópia e salvamento diretos. A tela Prints
+Tela captura diretamente quando há um único monitor; com vários, abre a escolha de tela. Janela abre a lista atual de janelas para escolher qual capturar. Ambas abrem a imagem capturada com a barra flutuante para anotar, copiar ou enviar. As fontes são escolhidas ao capturar, sem seletores fixos no painel. No Wayland, a escolha continua pelo portal do sistema. A tela Prints
 permite abrir o arquivo, enviar ao site ou abrir o link de um envio existente.
 Falhas no clipboard não apagam o PNG salvo.
 
