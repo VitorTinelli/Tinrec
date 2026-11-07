@@ -9,34 +9,28 @@ import {
 } from "react";
 import { Keyboard, X } from "lucide-react";
 import { call, message } from "./bridge";
+import { PrintShortcutsPanel } from "./screenshots/PrintShortcutsPanel";
+import {
+  readPrintBindings,
+  savePrintBindings,
+  validatePrintBindings,
+} from "./screenshots/toolShortcuts";
 
 export const shortcutActions = [
-  ["screenshot", "Print de área", "Seleciona e anota uma área da tela."],
-  ["screenshot-screen", "Print de tela", "Captura o monitor escolhido."],
-  ["screenshot-window", "Print de janela", "Captura uma janela."],
-  ["screen", "Gravar tela", "Escolhe uma tela e inicia a captura."],
-  ["window", "Gravar janela", "Abre a escolha de janela para gravação."],
-  ["area", "Gravar área", "Abre a seleção da área para gravação."],
-  ["show", "Abrir gravador", "Mostra a janela de gravação."],
-  [
-    "start",
-    "Iniciar gravação",
-    "Usa o nome, a qualidade e o áudio configurados.",
-  ],
-  ["stop", "Parar e salvar", "Finaliza a gravação atual."],
-  ["pause", "Pausar ou retomar", "Alterna a pausa da gravação atual."],
-  [
-    "microphone",
-    "Silenciar ou ativar microfone",
-    "Controla o microfone durante a gravação.",
-  ],
-  [
-    "system",
-    "Silenciar ou ativar som do computador",
-    "Controla o áudio do computador durante a gravação.",
-  ],
-  ["controls", "Mostrar mini menu", "Abre os controles da gravação atual."],
-  ["library", "Abrir biblioteca", "Mostra seus vídeos no aplicativo."],
+  ["screenshot", "Print de área"],
+  ["screenshot-screen", "Print de tela"],
+  ["screenshot-window", "Print de janela"],
+  ["screen", "Gravar tela"],
+  ["window", "Gravar janela"],
+  ["area", "Gravar área"],
+  ["show", "Abrir gravador"],
+  ["start", "Iniciar gravação"],
+  ["stop", "Parar e salvar"],
+  ["pause", "Pausar ou retomar"],
+  ["microphone", "Silenciar ou ativar microfone"],
+  ["system", "Silenciar ou ativar som do computador"],
+  ["controls", "Mostrar mini menu"],
+  ["library", "Abrir biblioteca"],
 ] as const;
 const shortcutGroups = [
   {
@@ -96,6 +90,7 @@ export function ShortcutsPanel() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [printDraft, setPrintDraft] = useState(readPrintBindings);
   const captureQueue = useRef<Promise<void>>(Promise.resolve());
   const capture = useCallback((enabled: boolean) => {
     const next = captureQueue.current
@@ -151,10 +146,12 @@ export function ShortcutsPanel() {
     setError(null);
     setSaved(false);
     try {
+      validatePrintBindings(printDraft);
       await capture(false);
       const value = await call<ShortcutView>("save_shortcuts", {
         bindings: draft,
       });
+      savePrintBindings(printDraft);
       setView(value);
       setDraft(value.bindings);
       setSaved(true);
@@ -175,26 +172,23 @@ export function ShortcutsPanel() {
           Atalhos de teclado e mouse
         </h2>
       </div>
-      <p>
-        Clique no campo e pressione a tecla ou o botão do mouse desejado. Aceita
-        teclas isoladas, como F5 e Q. Os atalhos funcionam mesmo com o Tinrec
-        minimizado.
-      </p>
       {shortcutGroups.map((group) => (
-        <section
+        <details
           className="shortcut-group"
           key={group.title}
           aria-label={group.title}
         >
-          <h3>{group.title}</h3>
+          <summary>
+            {group.title}
+            <span>{group.actions.length} atalhos</span>
+          </summary>
           <div className="shortcut-list">
             {group.actions
               .map((id) => shortcutActions.find(([action]) => action === id)!)
-              .map(([action, label, description]) => (
+              .map(([action, label]) => (
                 <div className="shortcut-row" key={action}>
                   <div>
                     <label htmlFor={`shortcut-${action}`}>{label}</label>
-                    <p>{description}</p>
                     {view.active[action] ? (
                       <span className="shortcut-active">
                         Ativo: {view.active[action]}
@@ -213,11 +207,7 @@ export function ShortcutsPanel() {
                     spellCheck={false}
                     maxLength={80}
                     onFocus={() => void capture(true).catch(() => {})}
-                    onBlur={() =>
-                      void capture(false).catch(
-                        () => {},
-                      )
-                    }
+                    onBlur={() => void capture(false).catch(() => {})}
                     onChange={(event) => update(action, event.target.value)}
                     onContextMenu={(event) => event.preventDefault()}
                     onMouseDown={(event: MouseEvent<HTMLInputElement>) => {
@@ -263,8 +253,17 @@ export function ShortcutsPanel() {
                 </div>
               ))}
           </div>
-        </section>
+        </details>
       ))}
+      <PrintShortcutsPanel
+        draft={printDraft}
+        pending={pending}
+        onChange={(bindings) => {
+          setPrintDraft(bindings);
+          setSaved(false);
+          setError(null);
+        }}
+      />
       {(error ?? view.error) ? (
         <p className="name-error" role="alert">
           {error ?? view.error}

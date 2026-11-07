@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { PrintOverlay } from "./PrintOverlay";
 import { call } from "../bridge";
 import { exportPng } from "./render";
+import { savePrintBindings, defaultPrintBindings } from "./toolShortcuts";
 vi.mock("../bridge", async (original) => ({
   ...(await original<typeof import("../bridge")>()),
   call: vi.fn(),
@@ -67,6 +68,53 @@ function drag(
   fireEvent.pointerDown(surface, { button: 0, clientX: x, clientY: y });
   fireEvent.pointerUp(surface, { clientX: endX, clientY: endY });
 }
+it("switches tools with defaults and saved bindings without interrupting text entry", async () => {
+  const { surface } = setup();
+  drag(surface, 100, 100, 500, 400);
+  fireEvent.keyDown(window, { key: "r" });
+  expect(screen.getByRole("button", { name: "Retângulo" }).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.keyDown(window, { key: "t", ctrlKey: true });
+  expect(screen.getByRole("button", { name: "Texto" }).getAttribute("aria-pressed")).toBe("false");
+  savePrintBindings({ ...defaultPrintBindings, text: "Shift+P" });
+  fireEvent.focus(window);
+  fireEvent.keyDown(window, { key: "P", shiftKey: true });
+  expect(screen.getByRole("button", { name: "Texto" }).getAttribute("aria-pressed")).toBe("true");
+  drag(surface, 150, 180, 150, 180);
+  const input = screen.getByRole("textbox", { name: "Texto da anotação" });
+  await userEvent.type(input, "rectangle");
+  expect(input).toHaveProperty("value", "rectangle");
+  expect(screen.getByRole("button", { name: "Texto" }).getAttribute("aria-pressed")).toBe("true");
+});
+it("uses a custom arrow number, advances it, and supports configurable adjustment keys", async () => {
+  const { surface, done } = setup();
+  drag(surface, 100, 100, 500, 400);
+  await userEvent.click(screen.getByRole("button", { name: "Seta numerada" }));
+  const number = screen.getByRole("spinbutton", { name: "Próximo número" });
+  fireEvent.change(number, { target: { value: "5" } });
+  drag(surface, 140, 150, 300, 250);
+  expect(number).toHaveProperty("value", "6");
+  fireEvent.keyDown(window, { key: "n" });
+  expect(number).toHaveProperty("value", "7");
+  fireEvent.keyDown(window, { key: "N", shiftKey: true });
+  expect(number).toHaveProperty("value", "6");
+  savePrintBindings({ ...defaultPrintBindings, "arrow-number-up": "Shift+P" });
+  fireEvent.focus(window);
+  fireEvent.keyDown(window, { key: "P", shiftKey: true });
+  expect(number).toHaveProperty("value", "7");
+  drag(surface, 150, 170, 320, 280);
+  expect(number).toHaveProperty("value", "8");
+  await userEvent.click(screen.getByRole("button", { name: "Desfazer" }));
+  expect(number).toHaveProperty("value", "7");
+  fireEvent.change(number, { target: { value: "5" } });
+  drag(surface, 160, 180, 340, 300);
+  await userEvent.click(screen.getByRole("button", { name: "Copiar" }));
+  await waitFor(() => expect(done).toHaveBeenCalledOnce());
+  expect(exportPng).toHaveBeenCalledWith(expect.objectContaining({ operations: [
+    expect.objectContaining({ tool: "crop" }),
+    expect.objectContaining({ tool: "numbered-arrow", number: 5 }),
+    expect.objectContaining({ tool: "numbered-arrow", number: 5 }),
+  ] }));
+});
 it.each(["Copiar", "Enviar ao site"])(
   "keeps selection on screen and exports edited crop for %s",
   async (label) => {
@@ -274,7 +322,10 @@ it("types text at the clicked point and exports an unfinished entry with Ctrl+C"
   drag(surface, 100, 100, 500, 400);
   await userEvent.click(screen.getByRole("button", { name: "Texto" }));
   expect(screen.queryByRole("textbox")).toBeNull();
-  drag(surface, 150, 180, 150, 180);
+  await userEvent.pointer([
+    { target: surface, coords: { clientX: 150, clientY: 180 }, keys: "[MouseLeft>]" },
+    { keys: "[/MouseLeft]" },
+  ]);
   const input = screen.getByRole("textbox", { name: "Texto da anotação" });
   expect(document.activeElement).toBe(input);
   await userEvent.type(input, "Minha anotação");

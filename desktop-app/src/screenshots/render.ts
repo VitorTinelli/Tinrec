@@ -48,11 +48,6 @@ export function pixelEffect(
       data[i + 1] = 255 - data[i + 1];
       data[i + 2] = 255 - data[i + 2];
     }
-    if (tool === "interlace" && Math.floor(i / 4 / width) % 4 < 2) {
-      data[i] *= 0.5;
-      data[i + 1] *= 0.5;
-      data[i + 2] *= 0.5;
-    }
   }
 }
 /** Three separable box passes approximate Gaussian blur in linear time. */
@@ -259,9 +254,7 @@ async function draw(ctx: CanvasRenderingContext2D, op: Operation) {
       break;
     case "blur":
     case "grayscale":
-    case "invert":
-    case "glow":
-    case "interlace": {
+    case "invert": {
       const x = Math.max(0, Math.floor(left)),
         y = Math.max(0, Math.floor(top)),
         w = Math.min(ctx.canvas.width - x, Math.ceil(width)),
@@ -272,25 +265,6 @@ async function draw(ctx: CanvasRenderingContext2D, op: Operation) {
         const original = ctx.getImageData(x, y, w, h);
         gaussianBlur(original.data, w, h, op.size);
         ctx.putImageData(original, x, y);
-      } else if (op.tool === "glow") {
-        const data = ctx.getImageData(x, y, w, h),
-          src = data.data.slice();
-        for (let row = 1; row < h - 1; row++)
-          for (let col = 1; col < w - 1; col++)
-            for (let c = 0; c < 3; c++) {
-              const i = (row * w + col) * 4 + c;
-              data.data[i] = Math.min(
-                255,
-                Math.abs(
-                  src[i] * 4 -
-                    src[i - 4] -
-                    src[i + 4] -
-                    src[i - w * 4] -
-                    src[i + w * 4],
-                ) * 2,
-              );
-            }
-        ctx.putImageData(data, x, y);
       } else {
         const data = ctx.getImageData(x, y, w, h);
         pixelEffect(data.data, w, op.tool);

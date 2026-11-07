@@ -1,4 +1,6 @@
 import { usePrintThickness } from "./usePrintThickness";
+import { ArrowNumberControl, useArrowNumber } from "./ArrowNumberControl";
+import { printToolForKey, usePrintBindings } from "./toolShortcuts";
 import {
   useEffect,
   useLayoutEffect,
@@ -24,7 +26,6 @@ import {
 import { call, message, type Preview } from "../bridge";
 import {
   region,
-  nextArrowNumber,
   type Operation,
   type Point,
   type PrintDocument,
@@ -115,6 +116,8 @@ export function PrintOverlay({
     [color, setColor] = useState("#ef4444"),
     [size, setSize] = usePrintThickness(2, 12);
   const [textEntry, setTextEntry] = useState<Operation | null>(null);
+  const [arrowNumber, setArrowNumber] = useArrowNumber(ops);
+  const bindings = usePrintBindings();
   const textEntryRef = useRef<Operation | null>(null);
   const textInput = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -247,6 +250,22 @@ export function PrintOverlay({
   }, [rect, ops, draft, preview]);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
+      const shortcutTool = printToolForKey(e, bindings);
+      if (shortcutTool === "arrow-number-up" || shortcutTool === "arrow-number-down") {
+        if (rect && !busy.current && tool === "numbered-arrow" && !drawing.current) {
+          e.preventDefault();
+          setArrowNumber(arrowNumber + (shortcutTool === "arrow-number-up" ? 1 : -1));
+        }
+        return;
+      }
+      if (rect && !busy.current && shortcutTool && tools.some(([value]) => value === shortcutTool)) {
+        e.preventDefault();
+        origin.current = null;
+        drawing.current = null;
+        setDraft(null);
+        setTool(shortcutTool);
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         if (busy.current || e.repeat) return;
@@ -285,7 +304,7 @@ export function PrintOverlay({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [onCancel, onDone, tool, rect, ops, color, size]);
+  }, [onCancel, onDone, tool, rect, ops, color, size, bindings, arrowNumber]);
   useEffect(() => {
     const wheel = (event: WheelEvent) => {
       if (!event.ctrlKey) return;
@@ -329,6 +348,8 @@ export function PrintOverlay({
     )
       return;
     if (rect && tool === "text") {
+      // Keep the pointer's default focus change from blurring the new input.
+      event.preventDefault();
       commitText();
       const entry: Operation = {
         id: crypto.randomUUID(),
@@ -356,7 +377,7 @@ export function PrintOverlay({
       drawing.current = {
         id: crypto.randomUUID(),
         tool: tool!,
-        number: tool === "numbered-arrow" ? nextArrowNumber(ops) : undefined,
+        number: tool === "numbered-arrow" ? arrowNumber : undefined,
         x: a.x,
         y: a.y,
         w: 0,
@@ -622,13 +643,13 @@ export function PrintOverlay({
           {tools.map(([value, label, Icon]) => (
             <button
               key={value}
-              title={
+              title={`${
                 value === "blur"
                   ? "Desfocar: arraste sobre textos ou detalhes da imagem"
                   : value === "fill"
                     ? "Ocultar: cubra uma área com uma cor sólida"
                     : label
-              }
+              }${bindings[value] ? ` (${bindings[value]})` : ""}`}
               aria-label={label}
               className={value === "fill" ? "print-fill-tool" : undefined}
               aria-pressed={tool === value}
@@ -642,6 +663,7 @@ export function PrintOverlay({
             </button>
           ))}
           <span className="print-toolbar-divider" aria-hidden="true" />
+          {tool === "numbered-arrow" && <ArrowNumberControl value={arrowNumber} onChange={setArrowNumber} disabled={pending} />}
           <input
             type="color"
             aria-label="Cor"

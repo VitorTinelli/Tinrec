@@ -1,4 +1,6 @@
 import { usePrintThickness } from "./usePrintThickness";
+import { ArrowNumberControl, useArrowNumber } from "./ArrowNumberControl";
+import { printToolForKey, usePrintBindings } from "./toolShortcuts";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import {
   MousePointer2,
@@ -15,8 +17,6 @@ import {
   Crop,
   Palette,
   Contrast,
-  Sparkles,
-  AlignJustify,
   MessageSquare,
 } from "lucide-react";
 import { call, message } from "../bridge";
@@ -25,7 +25,6 @@ import {
   dimensions,
   moveOperation,
   region,
-  nextArrowNumber,
   validateDocument,
   type Operation,
   type Point,
@@ -57,8 +56,6 @@ const tools: [Tool, string][] = [
   ["crop", "Recortar"],
   ["grayscale", "Cinza"],
   ["invert", "Inverter cores"],
-  ["glow", "Bordas luminosas"],
-  ["interlace", "Entrelaçar"],
 ];
 const toolIcons: Partial<Record<Tool, typeof Pencil>> = {
   select: MousePointer2,
@@ -76,8 +73,6 @@ const toolIcons: Partial<Record<Tool, typeof Pencil>> = {
   crop: Crop,
   grayscale: Palette,
   invert: Contrast,
-  glow: Sparkles,
-  interlace: AlignJustify,
 };
 const annotations = new Set<Tool>([
   "callout",
@@ -103,6 +98,7 @@ export function PrintEditor({
   onSaved: () => void;
 }) {
   const [picking, setPicking] = useState(false);
+  const bindings = usePrintBindings();
   const [doc, setDoc] = useState<PrintDocument>(
     capture.project ?? {
       version: 1,
@@ -112,6 +108,7 @@ export function PrintEditor({
       operations: [],
     },
   );
+  const [arrowNumber, setArrowNumber] = useArrowNumber(doc.operations);
   const [tool, setTool] = useState<Tool>(capture.needsCrop ? "crop" : "select"),
     [color, setColor] = useState("#eb4960"),
     [size, setSize] = usePrintThickness(1, 500),
@@ -315,7 +312,7 @@ export function PrintEditor({
       id: id(),
       tool,
       number:
-        tool === "numbered-arrow" ? nextArrowNumber(doc.operations) : undefined,
+        tool === "numbered-arrow" ? arrowNumber : undefined,
       x: p.x,
       y: p.y,
       w: 0,
@@ -489,6 +486,23 @@ export function PrintEditor({
   }
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
+      const shortcutTool = printToolForKey(event, bindings);
+      if (shortcutTool === "arrow-number-up" || shortcutTool === "arrow-number-down") {
+        if (!pending && tool === "numbered-arrow" && !drag.current) {
+          event.preventDefault();
+          setArrowNumber(arrowNumber + (shortcutTool === "arrow-number-up" ? 1 : -1));
+        }
+        return;
+      }
+      if (!pending && shortcutTool && tools.some(([value]) => value === shortcutTool)) {
+        event.preventDefault();
+        drag.current = null;
+        setDraft(null);
+        setTool(shortcutTool);
+        setSelected(null);
+        setPicking(false);
+        return;
+      }
       if (
         event.ctrlKey &&
         !event.altKey &&
@@ -533,7 +547,7 @@ export function PrintEditor({
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [doc, selected, tool, draft, picking, pending, title, onClose, onSaved]);
+  }, [doc, selected, tool, draft, picking, pending, title, onClose, onSaved, bindings, arrowNumber]);
   useEffect(() => {
     const wheel = (event: WheelEvent) => {
       if (!event.ctrlKey) return;
@@ -588,6 +602,7 @@ export function PrintEditor({
         </div>
       </header>
       <div className="editor-toolbar" aria-label="Ferramentas de edição">
+        {tool === "numbered-arrow" && <ArrowNumberControl value={arrowNumber} onChange={setArrowNumber} disabled={pending} />}
         {tools.map(([value, label]) => {
           const Icon = toolIcons[value] ?? Pencil;
           return (
@@ -595,7 +610,7 @@ export function PrintEditor({
               className="editor-tool-icon"
               key={value}
               aria-label={label}
-              title={label}
+              title={`${label}${bindings[value] ? ` (${bindings[value]})` : ""}`}
               aria-pressed={tool === value}
               disabled={pending}
               onClick={() => {

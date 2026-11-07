@@ -795,8 +795,42 @@ select {
 .shortcut-list {
   margin-top: 18px;
 }
+.arrow-number-control { display: inline-flex; align-items: center; gap: 4px; padding: 0 4px; }
+.arrow-number-control label { font-size: 10px; white-space: nowrap; }
+.arrow-number-control input[type=number] { width: 62px; min-width: 0; height: 28px; padding: 3px 5px; border: 1px solid #8090ab; border-radius: 4px; background: #fafbfc; color: #344054; font-size: 12px; }
+.arrow-number-control button { min-width: 24px; height: 28px; }
+.shortcut-group > summary { display: flex; align-items: center; gap: 12px; padding: 12px 0; list-style: none; cursor: pointer; color: #59647b; font-size: 12px; font-weight: 650; }
+.shortcut-group > summary::-webkit-details-marker { display: none; }
+.shortcut-group > summary > span { margin-left: auto; color: #949eae; font-size: 10px; font-weight: 400; }
+.shortcut-group > summary::after { content: ""; width: 6px; height: 6px; margin: 0 4px 3px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); }
+.shortcut-group[open] > summary::after { transform: rotate(225deg); margin-bottom: -3px; }
+.shortcut-group > summary:focus-visible { outline: 2px solid #6588f4; outline-offset: 3px; border-radius: 4px; }
+.print-source-dialog {
+  width: min(600px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  margin: auto;
+  padding: 24px;
+  border: 1px solid #e2e6ed;
+  border-radius: 16px;
+  background: #fff;
+  color: #262b34;
+  box-shadow: 0 20px 60px #18243b33;
+}
+.print-source-dialog::backdrop { background: #18243b66; }
+.print-source-window { padding: 22px; background: #fff; min-height: 100vh; }
+.print-source-window .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.print-source-window .print-source-list { max-height: none; }
+.print-source-dialog .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.print-source-list { display: grid; gap: 8px; margin-top: 18px; max-height: 55vh; overflow: auto; }
+.print-source-list > button { display: flex; align-items: center; gap: 14px; padding: 14px; border: 1px solid #e2e6ed; border-radius: 10px; background: #fafbfc; color: #59647b; text-align: left; }
+.print-source-list > button:hover, .print-source-list > button:focus-visible { background: #eff3ff; border-color: #6588f4; }
+.print-source-list svg { flex-shrink: 0; }
+.print-source-list span { min-width: 0; overflow-wrap: anywhere; }
+.print-source-list strong { display: block; font-size: 13px; }
+.print-source-list small { display: block; margin-top: 4px; color: #8995ab; }
 .shortcut-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(100px, 185px) 32px;
   align-items: center;
   gap: 10px;
   padding: 13px 0;
@@ -810,6 +844,7 @@ select {
   font-size: 11px;
   font-weight: 550;
   color: #667085;
+  overflow-wrap: anywhere;
 }
 .shortcut-row p {
   font-size: 10px;
@@ -818,15 +853,21 @@ select {
   margin-top: 4px;
 }
 .shortcut-row input {
-  width: 185px;
+  width: 100%;
   min-width: 0;
-  max-width: 45%;
+  max-width: 100%;
   border: 1px solid #e2e6ed;
   border-radius: 7px;
   padding: 9px;
   font-size: 11px;
   color: #596e9a;
   background: #fafbfc;
+}
+.shortcut-row > .icon-button {
+  width: 32px;
+  height: 34px;
+  padding: 0;
+  justify-self: end;
 }
 .shortcut-active {
   display: block;
@@ -836,6 +877,7 @@ select {
 }
 .shortcut-save {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   margin-top: 16px;

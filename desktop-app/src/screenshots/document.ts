@@ -13,8 +13,6 @@ export type Tool =
   | "blur"
   | "grayscale"
   | "invert"
-  | "glow"
-  | "interlace"
   | "crop"
   | "resize"
   | "image";
@@ -99,8 +97,6 @@ export function validateDocument(value: unknown): PrintDocument {
     "blur",
     "grayscale",
     "invert",
-    "glow",
-    "interlace",
     "crop",
     "resize",
     "image",

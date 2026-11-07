@@ -27,6 +27,7 @@ afterEach(cleanup);
 it("captura a combinação, aplica pelo backend e permite removê-la", async () => {
   const user = userEvent.setup();
   render(<ShortcutsPanel />);
+  for (const summary of document.querySelectorAll("summary")) await userEvent.click(summary);
   await waitFor(() => expect(call).toHaveBeenCalledWith("get_shortcuts"));
   const start = screen.getByRole("textbox", {
     name: "Atalho: Iniciar gravação",
@@ -84,6 +85,7 @@ it("mostra falhas de registro sem anunciar que os atalhos foram salvos", async (
   });
   const user = userEvent.setup();
   render(<ShortcutsPanel />);
+  for (const summary of document.querySelectorAll("summary")) await userEvent.click(summary);
   await user.click(screen.getByRole("button", { name: "Salvar atalhos" }));
   expect(await screen.findByRole("alert")).toHaveProperty(
     "textContent",
