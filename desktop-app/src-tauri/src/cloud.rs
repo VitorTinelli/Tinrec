@@ -41,6 +41,10 @@ pub struct Job {
     pub error: Option<String>,
     #[serde(default)]
     remove_local_after_upload: bool,
+    #[serde(default)]
+    notify_on_upload: bool,
+    #[serde(default)]
+    notification_sent: bool,
     attempts: u32,
     next_retry: u64,
 }
@@ -335,6 +339,8 @@ impl Cloud {
             temporary_note: None,
             error: None,
             remove_local_after_upload: false,
+            notify_on_upload: image,
+            notification_sent: false,
             attempts: 0,
             next_retry: 0,
         });
@@ -404,14 +410,54 @@ impl Cloud {
         j.error = None;
         self.persist(&i)
     }
-    pub fn start(self: &Arc<Self>) {
+    pub fn start(self: &Arc<Self>, app: tauri::AppHandle) {
         let cloud = self.clone();
         std::thread::spawn(move || {
             loop {
                 cloud.tick();
+                match cloud.take_completed_prints() {
+                    Ok(urls) => {
+                        for url in urls {
+                            if let Err(error) = crate::notifications::print_uploaded(&app, &url) {
+                                crate::diagnostics::notify(&app, &error);
+                            }
+                        }
+                    }
+                    Err(error) => crate::diagnostics::notify(&app, &error),
+                }
                 std::thread::sleep(Duration::from_millis(500));
             }
         });
+    }
+    fn take_completed_prints(&self) -> Reply<Vec<String>> {
+        let mut inner = lock(&self.inner)?;
+        let Some(account) = inner.auth.as_ref().map(|auth| auth.account.clone()) else {
+            return Ok(Vec::new());
+        };
+        let mut pending = Vec::new();
+        for job in &mut inner.saved.jobs {
+            if job.account == account
+                && job.notify_on_upload
+                && !job.notification_sent
+                && job.status == "uploaded"
+                && job.url.is_some()
+            {
+                pending.push((job.id.clone(), job.url.clone().unwrap()));
+                job.notification_sent = true;
+            }
+        }
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Err(error) = self.persist(&inner) {
+            for job in &mut inner.saved.jobs {
+                if pending.iter().any(|(id, _)| id == &job.id) {
+                    job.notification_sent = false;
+                }
+            }
+            return Err(error);
+        }
+        Ok(pending.into_iter().map(|(_, url)| url).collect())
     }
     fn tick(&self) {
         let Ok(_operation) = self.operation.lock() else {
@@ -945,6 +991,49 @@ mod tests {
         ] {
             assert!(parse_range(Some(r), 100).is_err());
         }
+    }
+    #[test]
+    fn print_notifications_wait_for_upload_and_are_not_repeated() {
+        let (cloud, dir) = test_cloud();
+        authenticate(&cloud, "owner");
+        let print = dir.join("print.png");
+        fs::write(&print, b"png").unwrap();
+        cloud
+            .enqueue("print".into(), print, "Print".into(), 1080, 0., false)
+            .unwrap();
+        {
+            let mut inner = cloud.inner.lock().unwrap();
+            inner.saved.jobs[0].url = Some(format!("{SITE}/v/print"));
+        }
+        assert!(cloud.take_completed_prints().unwrap().is_empty());
+        cloud.inner.lock().unwrap().saved.jobs[0].status = "uploaded".into();
+        authenticate(&cloud, "other");
+        assert!(cloud.take_completed_prints().unwrap().is_empty());
+        authenticate(&cloud, "owner");
+        assert_eq!(
+            cloud.take_completed_prints().unwrap(),
+            vec![format!("{SITE}/v/print")]
+        );
+        assert!(cloud.take_completed_prints().unwrap().is_empty());
+        let saved: Saved = serde_json::from_slice(&fs::read(&cloud.file).unwrap()).unwrap();
+        assert!(saved.jobs[0].notification_sent);
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn videos_do_not_trigger_print_notifications() {
+        let (cloud, dir) = test_cloud();
+        authenticate(&cloud, "owner");
+        let video = dir.join("video.mp4");
+        fs::write(&video, b"video").unwrap();
+        cloud
+            .enqueue("video".into(), video, "Video".into(), 1080, 0., false)
+            .unwrap();
+        let mut inner = cloud.inner.lock().unwrap();
+        inner.saved.jobs[0].status = "uploaded".into();
+        inner.saved.jobs[0].url = Some(format!("{SITE}/v/video"));
+        drop(inner);
+        assert!(cloud.take_completed_prints().unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
     }
     fn test_cloud() -> (Arc<Cloud>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("tinrec-cloud-{}", uuid::Uuid::new_v4()));

@@ -9,13 +9,11 @@ static OPENING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 pub enum Page {
     Video(String),
-    Print(String),
 }
 
 pub fn open(app: tauri::AppHandle, state: Shared, page: Page) {
     let key = match &page {
         Page::Video(id) => format!("video:{id}"),
-        Page::Print(id) => format!("print:{id}"),
     };
     let registry = OPENING.get_or_init(Default::default);
     if !registry.lock().is_ok_and(|mut set| set.insert(key.clone())) {
@@ -25,7 +23,7 @@ pub fn open(app: tauri::AppHandle, state: Shared, page: Page) {
         let deadline = Instant::now() + Duration::from_secs(90);
         while !state.exiting.load(Ordering::Acquire) {
             let id = match &page {
-                Page::Print(id) | Page::Video(id) => id,
+                Page::Video(id) => id,
             };
             let url = state.cloud.page_url(id);
             match url {

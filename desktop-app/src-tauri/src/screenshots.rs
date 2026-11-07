@@ -952,11 +952,6 @@ fn export_image(
         if !keep_local {
             state.cloud.remove_local_after_upload(&job_id).map_err(|error| format!("O print está na fila, mas a política de limpeza não pôde ser salva: {error}. Arquivo preservado em {}", path.display()))?;
         }
-        crate::pages::open(
-            app.clone(),
-            state.clone(),
-            crate::pages::Page::Print(job_id.clone()),
-        );
         Some(job_id)
     } else {
         None
@@ -1040,13 +1035,9 @@ pub fn open_print(app: tauri::AppHandle, state: State<'_, Shared>, file_name: St
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
-pub fn upload_print(
-    app: tauri::AppHandle,
-    state: State<'_, Shared>,
-    file_name: String,
-) -> Reply<()> {
+pub fn upload_print(state: State<'_, Shared>, file_name: String) -> Reply<()> {
     let path = print_path(&state, &file_name)?;
-    let job_id = state.cloud.enqueue(
+    state.cloud.enqueue(
         uuid::Uuid::new_v4().to_string(),
         path.clone(),
         file_name.trim_end_matches(".png").to_string(),
@@ -1054,11 +1045,6 @@ pub fn upload_print(
         0.,
         false,
     )?;
-    crate::pages::open(
-        app,
-        state.inner().clone(),
-        crate::pages::Page::Print(job_id),
-    );
     Ok(())
 }
 

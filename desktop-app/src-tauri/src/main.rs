@@ -12,6 +12,7 @@ mod area_picker;
 mod capture_border;
 mod print_frame;
 mod screenshots;
+mod notifications;
 mod shortcuts;
 mod smoke;
 mod tray;
@@ -613,7 +614,6 @@ fn main() {
                     .join("Tinrec")
             };
             let cloud = cloud::Cloud::new(&data).map_err(std::io::Error::other)?;
-            cloud.start();
             app.manage(Arc::new(AppState {
                 cloud,
                 exiting: AtomicBool::new(false),
@@ -640,6 +640,7 @@ fn main() {
             app.manage(screenshots::Prints::default());
             app.manage(area_picker::Picker::default());
             app.manage(shortcuts::Shortcuts::new(data.join("shortcuts.json")));
+            app.state::<Shared>().cloud.start(app.handle().clone());
             if std::env::var_os("WAYLAND_DISPLAY").is_none() || !cfg!(target_os = "linux") {
                 app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
