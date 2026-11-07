@@ -341,7 +341,19 @@ fn dispatch(app: &tauri::AppHandle, action: &str) {
             let _ = app.emit_to("main", "shortcut-action", action);
         }
         "screenshot" | "screenshot-screen" | "screenshot-window" if !snapshot.busy() => {
-            let _ = app.emit_to("main", "shortcut-action", action);
+            let mode = match action {
+                "screenshot-screen" => "screen",
+                "screenshot-window" => "window",
+                _ => "area",
+            };
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) =
+                    crate::screenshots::start_print_capture(app.clone(), mode.into()).await
+                {
+                    let _ = app.emit_to("main", "desktop-error", error);
+                }
+            });
         }
         "area" if !snapshot.busy() => {
             let _ = app.emit_to("main", "shortcut-action", action);

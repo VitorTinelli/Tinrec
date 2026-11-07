@@ -16,6 +16,107 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 
+async fn prepare_capture(app: tauri::AppHandle) -> Reply<()> {
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let ui_app = app.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| -> Reply<()> {
+            for label in ["main", "print-source"] {
+                if let Some(window) = ui_app.get_webview_window(label) {
+                    #[cfg(target_os = "windows")]
+                    window
+                        .set_content_protected(true)
+                        .map_err(|e| e.to_string())?;
+                    window.hide().map_err(|e| e.to_string())?;
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            IsWindowVisible, SW_HIDE, ShowWindow,
+                        };
+                        let handle = window.hwnd().map_err(|e| e.to_string())?.0;
+                        ShowWindow(handle, SW_HIDE);
+                        if IsWindowVisible(handle) != 0 {
+                            return Err(
+                                "Não foi possível ocultar o Tinrec antes da captura.".into()
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        let _ = send.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    receive
+        .await
+        .map_err(|_| "Preparação da captura interrompida".to_string())??;
+    // Window visibility is not proof that the compositor has repainted the desktop.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    #[cfg(target_os = "windows")]
+    tauri::async_runtime::spawn_blocking(|| unsafe {
+        windows_sys::Win32::Graphics::Dwm::DwmFlush();
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn start_print_capture(app: tauri::AppHandle, mode: String) -> Reply<()> {
+    if !["screen", "window", "area"].contains(&mode.as_str()) {
+        return Err("Modo inválido".into());
+    }
+    if let Some(window) = app.get_webview_window("print-source") {
+        if !app.state::<Prints>().busy.load(Ordering::Acquire) {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
+        return Ok(());
+    }
+    if snapshot_busy(&app) {
+        return Err("Finalize a captura atual.".into());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "print-source",
+        tauri::WebviewUrl::App(format!("index.html?window=print-source&mode={mode}").into()),
+    )
+    .title("Tinrec — Selecionar captura")
+    .inner_size(560.0, 440.0)
+    .min_inner_size(360.0, 280.0)
+    .center()
+    .visible(false)
+    .skip_taskbar(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+fn snapshot_busy(app: &tauri::AppHandle) -> bool {
+    crate::snapshot_value(&app.state::<Shared>()).map_or(true, |s| s.busy())
+        || app.state::<Prints>().busy.load(Ordering::Acquire)
+        || app.state::<crate::area_picker::Picker>().active()
+}
+#[tauri::command]
+pub fn print_source_visibility(app: tauri::AppHandle, visible: bool) -> Reply<()> {
+    let window = app
+        .get_webview_window("print-source")
+        .ok_or("Seleção encerrada")?;
+    if visible {
+        window.show().map_err(|e| e.to_string())?;
+        window.set_focus().map_err(|e| e.to_string())
+    } else {
+        window.hide().map_err(|e| e.to_string())
+    }
+}
+#[tauri::command]
+pub fn close_print_source(app: tauri::AppHandle) -> Reply<()> {
+    if let Some(window) = app.get_webview_window("print-source") {
+        window.destroy().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct Prints {
     pub busy: AtomicBool,
@@ -242,9 +343,10 @@ pub async fn capture_print(
     window: String,
     action: Option<String>,
 ) -> Reply<Capture> {
+    let interactive = mode == "area" || action.as_deref() == Some("edit");
     if action
         .as_deref()
-        .is_some_and(|action| !["copy", "save"].contains(&action))
+        .is_some_and(|action| !["copy", "save", "edit"].contains(&action))
         || (mode == "area" && action.is_some())
     {
         return Err("Ação de captura inválida".into());
@@ -266,17 +368,9 @@ pub async fn capture_print(
         prints.cancelled.store(false, Ordering::Release);
         prints.capturing.store(true, Ordering::Release);
     }
-    let restore = main.is_visible().unwrap_or(false);
-    if restore {
-        let _ = main.hide();
-        if cfg!(target_os = "windows") {
-            let _ = main.is_visible();
-        }
-    }
+    let restore = main.is_visible().unwrap_or(false) && !main.is_minimized().unwrap_or(false);
     let result: Reply<Capture> = async {
-        if restore && !cfg!(target_os = "windows") {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        prepare_capture(app.clone()).await?;
         let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
         let selection =
             if mode == "area" && cfg!(target_os = "windows") && !crate::synthetic_enabled() {
@@ -413,6 +507,7 @@ pub async fn capture_print(
             return Err("Captura cancelada".into());
         }
         if mode != "area"
+            && !interactive
             && let Some(action) = action
         {
             let (width, height) = (image.width(), image.height());
@@ -438,7 +533,7 @@ pub async fn capture_print(
                 needs_crop: false,
             });
         }
-        let image = if mode == "area" {
+        let image = if interactive {
             let image = std::sync::Arc::new(image);
             let (sender, receiver) = mpsc::channel();
             if let Some(selection) = &selection
@@ -462,7 +557,16 @@ pub async fn capture_print(
                 encoded_preview(&image)?
             };
             let preview = crate::Preview {
-                initial_selection: selection.as_ref().map(|s| s.region),
+                initial_selection: if mode == "area" {
+                    selection.as_ref().map(|s| s.region)
+                } else {
+                    Some(crate::area_picker::Region {
+                        x: 0,
+                        y: 0,
+                        width: image.width(),
+                        height: image.height(),
+                    })
+                },
                 session_id: frame_id,
                 sequence: 1,
                 image: image_source,
@@ -497,7 +601,12 @@ pub async fn capture_print(
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                let monitor = if cfg!(target_os = "windows") && !crate::synthetic_enabled() {
+                let monitor = if mode == "window" {
+                    main.current_monitor()
+                        .map_err(|e| e.to_string())?
+                        .or_else(|| main.primary_monitor().ok().flatten())
+                        .ok_or("Monitor indisponível")?
+                } else if cfg!(target_os = "windows") && !crate::synthetic_enabled() {
                     crate::windows::capture_monitor(&app, &requested_display)?
                 } else {
                     monitors
@@ -527,12 +636,29 @@ pub async fn capture_print(
                 overlay
                     .set_position(*monitor.position())
                     .map_err(|e| e.to_string())?;
-                overlay
-                    .set_size(*monitor.size())
-                    .map_err(|e| e.to_string())?;
-                overlay
-                    .set_position(*monitor.position())
-                    .map_err(|e| e.to_string())?;
+                if mode == "window" {
+                    let scale = (monitor.size().width as f64 / image.width() as f64)
+                        .min(monitor.size().height as f64 / image.height() as f64)
+                        .min(1.0);
+                    let width = (image.width() as f64 * scale).round() as u32;
+                    let height = (image.height() as f64 * scale).round() as u32;
+                    overlay
+                        .set_size(tauri::PhysicalSize::new(width, height))
+                        .map_err(|e| e.to_string())?;
+                    overlay
+                        .set_position(tauri::PhysicalPosition::new(
+                            monitor.position().x + ((monitor.size().width - width) / 2) as i32,
+                            monitor.position().y + ((monitor.size().height - height) / 2) as i32,
+                        ))
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    overlay
+                        .set_size(*monitor.size())
+                        .map_err(|e| e.to_string())?;
+                    overlay
+                        .set_position(*monitor.position())
+                        .map_err(|e| e.to_string())?;
+                }
             }
             *lock(&prints.area)? = Some(PrintArea {
                 source: image.clone(),
@@ -586,6 +712,12 @@ pub async fn capture_print(
         })
     }
     .await;
+    #[cfg(target_os = "windows")]
+    for label in ["main", "print-source"] {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.set_content_protected(false);
+        }
+    }
     if restore {
         let _ = main.show();
         let _ = main.set_focus();

@@ -4,6 +4,7 @@
   "description": "Eventos da janela principal. Arquivos são abertos por comandos Rust restritos às gravações.",
   "windows": [
     "main",
+    "print-source",
     "area",
     "print-area",
     "monitor-area-*",

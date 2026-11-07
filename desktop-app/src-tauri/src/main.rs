@@ -723,6 +723,9 @@ fn main() {
             screenshots::save_print_project,
             screenshots::open_print_project,
             screenshots::capture_print,
+            screenshots::start_print_capture,
+            screenshots::print_source_visibility,
+            screenshots::close_print_source,
             screenshots::close_print,
             screenshots::export_print,
             screenshots::export_print_selection,
@@ -770,6 +773,7 @@ fn main() {
                 save_webcam_position(window.app_handle());
             }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "print-source" { return; }
                 api.prevent_close();
                 if area_picker::is_window(window.label()) {
                     area_picker::cancel(window.app_handle(), window.label());

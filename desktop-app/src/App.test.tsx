@@ -40,6 +40,7 @@ async function publish(next: Partial<Snapshot>) {
   await act(async () => listener(current));
 }
 beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", { configurable: true, value: function () { this.setAttribute("open", ""); } });
   vi.stubGlobal(
     "IntersectionObserver",
     class {
@@ -451,11 +452,11 @@ it("encaminha cada atalho ao modo de print correspondente", async () => {
     await act(async () => shortcutListener({ payload: action }));
     await waitFor(() =>
       expect(
-        vi.mocked(call).mock.calls.filter(([name]) => name === "close_print"),
+        vi.mocked(call).mock.calls.filter(([name]) => name === "start_print_capture"),
       ).toHaveLength(index + 1),
     );
     expect(call).toHaveBeenCalledWith(
-      "capture_print",
+      "start_print_capture",
       expect.objectContaining({ mode }),
     );
   }

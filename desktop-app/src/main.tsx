@@ -1,4 +1,5 @@
 import { CaptureBorder } from "./CaptureBorder";
+import { PrintSourceWindow } from "./screenshots/PrintSourceWindow";
 import { MonitorAreaWindow } from "./MonitorAreaWindow";
 import { AreaSelectionWindow } from "./AreaSelector";
 import { StrictMode, useEffect } from "react";
@@ -82,6 +83,8 @@ createRoot(document.getElementById("root")!).render(
       >
         Tinrec — captura de janela em teste
       </div>
+    ) : surface === "print-source" ? (
+      <PrintSourceWindow />
     ) : captureBorder ? (
       <CaptureBorder />
     ) : monitorArea ? (

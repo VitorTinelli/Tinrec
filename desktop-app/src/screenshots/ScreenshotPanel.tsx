@@ -1,9 +1,6 @@
 import { Monitor, AppWindow, Scan, ArrowUpRight, Upload } from "lucide-react";
 import { useCallback, useEffect, useState, useRef } from "react";
 import { call, message, size, type Sources } from "../bridge";
-interface PrintCapture {
-  image: string;
-}
 interface PrintFile {
   fileName: string;
   title: string;
@@ -12,12 +9,9 @@ interface PrintFile {
   thumbnail: string;
 }
 export function ScreenshotPanel({
-  sources,
   display,
   windowId,
   disabled,
-  onWindow,
-  onDisplay,
   shortcut,
   shortcutMode = "area",
   libraryOnly = false,
@@ -37,6 +31,7 @@ export function ScreenshotPanel({
   onBusyChange?: (busy: boolean) => void;
 }) {
   const [selectedMode, setSelectedMode] = useState("screen");
+  const capturing = useRef(false);
   const [pending, setPending] = useState(false),
     [notice, setNotice] = useState(""),
     [error, setError] = useState(""),
@@ -52,10 +47,6 @@ export function ScreenshotPanel({
     mounted.current = true;
     return () => {
       mounted.current = false;
-      if (opened.current) {
-        opened.current = false;
-        void call("close_print").catch(() => {});
-      }
     };
   }, []);
   const refreshRevision = useRef(0);
@@ -74,34 +65,19 @@ export function ScreenshotPanel({
     void refresh();
   }, [refresh]);
   async function take(mode: "screen" | "window" | "area") {
-    if (pending || disabled) return;
+    if (capturing.current || disabled) return;
+    capturing.current = true;
     setSelectedMode(mode);
     setPending(true);
     setError("");
     setNotice("");
     try {
-      const result = await call<PrintCapture>("capture_print", {
-        mode,
-        display,
-        window: windowId,
-        ...(mode === "area" ? {} : { action: "copy" }),
-      });
-      if (mode === "area") return;
-      opened.current = true;
-      const title = `Print - ${new Date().toLocaleString("pt-BR").replace(/[/:]/g, "-")}`;
-      if (result.image)
-        await call("export_print", {
-          image: result.image,
-          title,
-          action: "copy",
-        });
-      if (mounted.current) setNotice("Print copiado.");
+      await call("start_print_capture", { mode });
     } catch (e) {
       const text = message(e);
       if (!/cancel/i.test(text)) setError(text);
     } finally {
-      opened.current = false;
-      await call("close_print").catch(() => {});
+      capturing.current = false;
       if (mounted.current) setPending(false);
       void refresh();
     }
@@ -153,11 +129,7 @@ export function ScreenshotPanel({
                       ? "Print da janela"
                       : "Print de uma área"
                 }
-                disabled={
-                  disabled ||
-                  pending ||
-                  (mode === "window" && !sources?.wayland && !windowId)
-                }
+                disabled={disabled || pending}
                 onClick={() => void take(mode as "screen" | "window" | "area")}
               >
                 <Icon size={20} />
@@ -165,40 +137,6 @@ export function ScreenshotPanel({
               </button>
             ))}
           </div>
-          {!sources?.wayland && (
-            <div className="field-grid">
-              <label>
-                Tela
-                <select
-                  value={display}
-                  onChange={(e) => onDisplay(e.target.value)}
-                  disabled={pending || disabled}
-                >
-                  <option value="auto">Tela principal</option>
-                  {sources?.displays.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Janela
-                <select
-                  value={windowId}
-                  onChange={(e) => onWindow(e.target.value)}
-                  disabled={pending || disabled}
-                >
-                  <option value="">Escolha uma janela</option>
-                  {sources?.windows?.map((w) => (
-                    <option value={w.id} key={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
           {pending && (
             <p role="status">Preparando print… Conclua a seleção no sistema.</p>
           )}
